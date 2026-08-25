@@ -1,0 +1,177 @@
+// Family Budget Tracker — data model
+//
+// Default datasource is SQLite for zero-config local/self-hosted use.
+// For production, switch provider to "postgresql" and point DATABASE_URL
+// at a managed Postgres instance (Neon, Supabase, RDS, etc.) — no schema
+// changes required.
+//
+// NOTE: SQLite's Prisma connector doesn't support native enums, so
+// enum-like fields below are plain `String` columns. The allowed values
+// for each are defined as TypeScript union types in src/lib/enums.ts —
+// treat that file as the source of truth.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// A family member who can log in and/or send WhatsApp messages.
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  /// "OWNER" | "PARTNER" — see src/lib/enums.ts
+  role         String   @default("PARTNER")
+  // E.164 phone number used to identify inbound WhatsApp messages, e.g. +61412345678
+  whatsappPhone String? @unique
+  createdAt    DateTime @default(now())
+
+  transactions        Transaction[]
+  pocketContributions PocketContribution[]
+  inboundMessages     InboundMessage[]
+}
+
+/// A real-world bank/cash account. Buckets and Pockets are funded from one.
+model Account {
+  id          String   @id @default(cuid())
+  name        String
+  institution String?
+  /// "CHECKING" | "SAVINGS" | "CREDIT_CARD" | "CASH" — see src/lib/enums.ts
+  type        String   @default("CHECKING")
+  currency    String   @default("AUD")
+  // Manually maintained running balance (live bank-feed sync is a future
+  // integration point — see src/lib/bank-feed/README.md).
+  balance     Decimal  @default(0)
+  archived    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  buckets      Bucket[]
+  pockets      Pocket[]
+  transactions Transaction[]
+}
+
+/// A recurring monthly budget category ("envelope"). Spending against a
+/// bucket is compared to `monthlyLimit` for the current calendar month.
+model Bucket {
+  id          String  @id @default(cuid())
+  name        String
+  description String?
+  /// "ESSENTIAL" | "DISCRETIONARY" | "MICRO" — see src/lib/enums.ts
+  kind        String  @default("ESSENTIAL")
+  monthlyLimit Decimal
+  // Amount below which a transaction is auto-flagged as a "micro expense"
+  // for reporting, regardless of which bucket it lands in.
+  microThreshold Decimal @default(15)
+  color       String   @default("#22c56b")
+  icon        String   @default("wallet")
+  account     Account  @relation(fields: [accountId], references: [id])
+  accountId   String
+  archived    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  transactions Transaction[]
+
+  @@index([accountId])
+}
+
+/// A savings "sinking fund" pocket for things that are irregular but
+/// predictable — holidays, festivities, trips, an emergency fund. Grows
+/// over time via contributions rather than resetting monthly.
+model Pocket {
+  id           String    @id @default(cuid())
+  name         String
+  /// "HOLIDAY" | "FESTIVITY" | "TRIP" | "EMERGENCY" | "OTHER" — see src/lib/enums.ts
+  goalType     String    @default("OTHER")
+  targetAmount Decimal?
+  targetDate   DateTime?
+  // Suggested recurring monthly contribution to hit targetAmount by targetDate.
+  monthlyContribution Decimal @default(0)
+  currentAmount Decimal  @default(0)
+  account      Account   @relation(fields: [accountId], references: [id])
+  accountId    String
+  archived     Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+
+  contributions PocketContribution[]
+
+  @@index([accountId])
+}
+
+model PocketContribution {
+  id            String   @id @default(cuid())
+  pocket        Pocket   @relation(fields: [pocketId], references: [id], onDelete: Cascade)
+  pocketId      String
+  amount        Decimal
+  note          String?
+  contributedBy User?    @relation(fields: [userId], references: [id])
+  userId        String?
+  createdAt     DateTime @default(now())
+
+  @@index([pocketId])
+}
+
+/// A single expense (or income/refund, via negative amount) posted against
+/// a Bucket and drawn from an Account.
+model Transaction {
+  id         String   @id @default(cuid())
+  amount     Decimal
+  currency   String   @default("AUD")
+  merchant   String?
+  note       String?
+  occurredAt DateTime @default(now())
+  /// "MANUAL" | "WHATSAPP_IMAGE" | "WHATSAPP_AUDIO" | "WHATSAPP_TEXT" | "IMPORT"
+  source     String   @default("MANUAL")
+  isMicro    Boolean  @default(false)
+  // AI confidence (0-1) in the bucket assignment, null for manual entries.
+  aiConfidence Float?
+  aiRawNote    String? // raw transcript/receipt text kept for audit + re-categorization
+
+  bucket   Bucket? @relation(fields: [bucketId], references: [id])
+  bucketId String?
+  account  Account @relation(fields: [accountId], references: [id])
+  accountId String
+  loggedBy User?   @relation(fields: [userId], references: [id])
+  userId   String?
+
+  inboundMessage InboundMessage?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([bucketId])
+  @@index([accountId])
+  @@index([occurredAt])
+}
+
+/// Raw record of an inbound WhatsApp message, so the AI ingestion pipeline
+/// is auditable and replies (e.g. "2" to pick bucket #2) can be resolved
+/// against the most recent pending message from that sender.
+model InboundMessage {
+  id           String  @id @default(cuid())
+  waMessageId  String  @unique
+  fromPhone    String
+  user         User?   @relation(fields: [userId], references: [id])
+  userId       String?
+  /// "IMAGE" | "AUDIO" | "TEXT"
+  kind         String
+  mediaId      String?
+  transcript   String?
+  // Serialized CategorizationResult, kept while awaiting a bucket-choice
+  // reply from the sender (e.g. "2") so the confirmation can complete the
+  // transaction without re-running the AI extraction.
+  extractedJson String?
+  /// "RECEIVED" | "PROCESSING" | "NEEDS_CONFIRMATION" | "CONFIRMED" | "FAILED"
+  status       String  @default("RECEIVED")
+  errorMessage String?
+
+  transaction   Transaction? @relation(fields: [transactionId], references: [id])
+  transactionId String?      @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
