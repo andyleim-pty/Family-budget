@@ -1,8 +1,10 @@
 import { prisma } from "@/lib/prisma";
-import { categorizeImage, categorizeText, type CategorizationResult } from "@/lib/ai/categorize";
+import { categorizeImage, categorizeText, classifyIntent, type CategorizationResult } from "@/lib/ai/categorize";
 import { transcribeAudio } from "@/lib/ai/transcribe";
 import { downloadWhatsAppMedia, sendWhatsAppText } from "@/lib/whatsapp/client";
 import { getBucketStatuses, suggestionFor } from "@/lib/budget";
+import { runAssistantTurn } from "@/lib/ai/assistant";
+import { getOrCreateConversation, getRecentMessages, appendMessage } from "@/lib/conversations";
 import type { MessageKind } from "@/lib/enums";
 
 type InboundWhatsAppMessage = {
@@ -29,6 +31,20 @@ export async function handleInboundWhatsAppMessage(msg: InboundWhatsAppMessage) 
     if (pending) {
       const resolved = await tryResolvePendingReply(pending, msg.text.trim());
       if (resolved) return;
+    }
+
+    // Not every text message is reporting an expense — "should I get a
+    // coffee?" needs the advisor chat, not the expense extractor.
+    try {
+      const intent = await classifyIntent(msg.text);
+      if (intent === "question") {
+        await handleAssistantQuestion(msg.waMessageId, msg.fromPhone, user?.id ?? null, msg.text);
+        return;
+      }
+    } catch (err) {
+      // If intent classification itself fails (e.g. no API key), fall
+      // through to the normal expense flow, which has its own error handling.
+      console.error("Intent classification failed:", err);
     }
   }
 
@@ -72,6 +88,35 @@ export async function handleInboundWhatsAppMessage(msg: InboundWhatsAppMessage) 
       friendlyErrorMessage(err) +
         "\n\nYou can also just type it, e.g. \"$12.50 coffee\" or add it in the app."
     );
+  }
+}
+
+/** Routes a question / advice-seeking WhatsApp text to the chat assistant, with per-phone-number memory. */
+async function handleAssistantQuestion(
+  waMessageId: string,
+  fromPhone: string,
+  userId: string | null,
+  text: string
+) {
+  const record = await prisma.inboundMessage.create({
+    data: { waMessageId, fromPhone, userId, kind: "TEXT", status: "PROCESSING" },
+  });
+
+  try {
+    const conversation = await getOrCreateConversation({ channel: "WHATSAPP", userId, phone: fromPhone });
+    const history = await getRecentMessages(conversation.id);
+    const reply = await runAssistantTurn(history, text, userId);
+
+    await appendMessage(conversation.id, "user", text);
+    await appendMessage(conversation.id, "assistant", reply);
+    await prisma.inboundMessage.update({ where: { id: record.id }, data: { status: "ANSWERED" } });
+    await safeReply(fromPhone, reply);
+  } catch (err: any) {
+    await prisma.inboundMessage.update({
+      where: { id: record.id },
+      data: { status: "FAILED", errorMessage: String(err?.message ?? err) },
+    });
+    await safeReply(fromPhone, friendlyErrorMessage(err));
   }
 }
 

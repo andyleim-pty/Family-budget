@@ -30,6 +30,7 @@ export const TRANSACTION_SOURCES = [
   "WHATSAPP_IMAGE",
   "WHATSAPP_AUDIO",
   "WHATSAPP_TEXT",
+  "ASSISTANT_CHAT",
   "IMPORT",
 ] as const;
 export type TransactionSource = (typeof TRANSACTION_SOURCES)[number];
@@ -42,6 +43,13 @@ export const MESSAGE_STATUSES = [
   "PROCESSING",
   "NEEDS_CONFIRMATION",
   "CONFIRMED",
+  "ANSWERED", // handled as a chat/question, not filed as a transaction
   "FAILED",
 ] as const;
 export type MessageStatus = (typeof MESSAGE_STATUSES)[number];
+
+export const CONVERSATION_CHANNELS = ["WEB", "WHATSAPP"] as const;
+export type ConversationChannel = (typeof CONVERSATION_CHANNELS)[number];
+
+export const CHAT_ROLES = ["user", "assistant"] as const;
+export type ChatRole = (typeof CHAT_ROLES)[number];

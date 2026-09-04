@@ -1,6 +1,7 @@
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { getHouseholdSummary } from "@/lib/budget";
+import { getCashFlowProjection } from "@/lib/analytics";
 import Nav from "@/components/Nav";
 import BucketCard from "@/components/BucketCard";
 import PocketCard from "@/components/PocketCard";
@@ -9,6 +10,8 @@ import Link from "next/link";
 export default async function DashboardPage() {
   const session = await getServerSession(authOptions);
   const summary = await getHouseholdSummary();
+  const cashFlow = await getCashFlowProjection();
+  const atRiskAccounts = cashFlow.filter((c) => c.atRisk);
 
   return (
     <div>
@@ -31,6 +34,22 @@ export default async function DashboardPage() {
               tone="warn"
             />
           </div>
+
+          {atRiskAccounts.length > 0 && (
+            <div className="mt-4 card p-4 border-red-200 bg-red-50">
+              <p className="text-sm font-semibold text-red-800">Projected to go negative</p>
+              <ul className="text-sm text-red-800 mt-1 list-disc list-inside space-y-0.5">
+                {atRiskAccounts.map((c) => (
+                  <li key={c.accountId}>
+                    {c.accountName} is on track to end the month ${Math.round(Math.abs(c.projectedEndOfMonthBalance))} short.{" "}
+                    <Link href="/insights" className="underline font-medium">
+                      See why →
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {(summary.overBudgetBuckets.length > 0 || summary.atRiskBuckets.length > 0) && (
             <div className="mt-4 card p-4 border-amber-200 bg-amber-50">

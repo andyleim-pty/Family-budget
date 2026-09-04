@@ -128,3 +128,40 @@ export async function categorizeText(text: string): Promise<CategorizationResult
     },
   ]);
 }
+
+const INTENT_TOOL_NAME = "classify_message";
+
+/**
+ * Decides whether an inbound WhatsApp text is reporting a past/current
+ * expense (route to categorizeText) or asking a question / seeking advice
+ * (route to the chat assistant) — e.g. "$5 coffee" vs. "should I get a coffee?".
+ */
+export async function classifyIntent(text: string): Promise<"expense" | "question"> {
+  const message = await client().messages.create({
+    model: process.env.ANTHROPIC_MODEL || "claude-sonnet-5",
+    max_tokens: 128,
+    tools: [
+      {
+        name: INTENT_TOOL_NAME,
+        description: "Classify an inbound WhatsApp message.",
+        input_schema: {
+          type: "object",
+          properties: {
+            intent: {
+              type: "string",
+              enum: ["expense", "question"],
+              description:
+                '"expense" if reporting a purchase that already happened or is happening now (has or implies an amount). "question" for anything else — asking for advice, asking about budget status, small talk, or a hypothetical purchase not yet made.',
+            },
+          },
+          required: ["intent"],
+        },
+      },
+    ],
+    tool_choice: { type: "tool", name: INTENT_TOOL_NAME },
+    messages: [{ role: "user", content: text }],
+  });
+  const toolUse = message.content.find((c): c is Anthropic.ToolUseBlock => c.type === "tool_use");
+  const intent = (toolUse?.input as any)?.intent;
+  return intent === "question" ? "question" : "expense";
+}
