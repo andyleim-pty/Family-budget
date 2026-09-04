@@ -18,7 +18,10 @@ export default function CsvImportForm({ accounts }: { accounts: { id: string; na
     setError(null);
     setResult(null);
     try {
-      const summary = await importStatementCsv(accountId, file);
+      const formData = new FormData();
+      formData.set("accountId", accountId);
+      formData.set("file", file);
+      const summary = await importStatementCsv(formData);
       setResult(summary);
       if (fileInput.current) fileInput.current.value = "";
     } catch (err: any) {
@@ -58,7 +61,8 @@ export default function CsvImportForm({ accounts }: { accounts: { id: string; na
         <p className="text-sm text-brand-700 bg-brand-50 rounded-md px-3 py-2">
           Imported {result.imported} transaction{result.imported === 1 ? "" : "s"}
           {result.duplicates > 0 && ` · ${result.duplicates} already imported (skipped)`}
-          {result.skippedRows > 0 && ` · ${result.skippedRows} row(s) couldn't be read`}
+          {result.nonExpenseRows > 0 && ` · ${result.nonExpenseRows} row(s) looked like income/credits (not imported)`}
+          {result.unreadableRows > 0 && ` · ${result.unreadableRows} row(s) couldn't be read`}
           {result.uncategorized > 0 && ` · ${result.uncategorized} need a bucket assigned manually`}
           .
         </p>

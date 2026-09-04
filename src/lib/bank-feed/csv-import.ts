@@ -72,9 +72,11 @@ function parseDate(raw: string): Date {
  * format — it recognizes a single "Amount" column, or separate
  * "Debit"/"Credit" columns, whichever the file has.
  */
-export function parseStatementCsv(text: string): { rows: StatementRow[]; skipped: number } {
+export function parseStatementCsv(
+  text: string
+): { rows: StatementRow[]; unreadable: number; nonExpense: number } {
   const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-  if (lines.length < 2) return { rows: [], skipped: 0 };
+  if (lines.length < 2) return { rows: [], unreadable: 0, nonExpense: 0 };
 
   const headers = splitCsvLine(lines[0]).map((h) => h.toLowerCase());
   const dateCol = findColumn(headers, DATE_HEADERS);
@@ -92,14 +94,14 @@ export function parseStatementCsv(text: string): { rows: StatementRow[]; skipped
 
   type RawRow = { occurredAt: Date; description: string; signedAmount: number };
   const raw: RawRow[] = [];
-  let skipped = 0;
+  let unreadable = 0;
 
   for (const line of lines.slice(1)) {
     const cells = splitCsvLine(line);
     const occurredAt = parseDate(cells[dateCol] ?? "");
     const description = (cells[descCol] ?? "").trim();
     if (Number.isNaN(occurredAt.getTime()) || !description) {
-      skipped++;
+      unreadable++;
       continue;
     }
 
@@ -115,7 +117,7 @@ export function parseStatementCsv(text: string): { rows: StatementRow[]; skipped
     }
 
     if (signedAmount === 0) {
-      skipped++;
+      unreadable++;
       continue;
     }
     raw.push({ occurredAt, description, signedAmount });
@@ -134,12 +136,14 @@ export function parseStatementCsv(text: string): { rows: StatementRow[]; skipped
   }
 
   const rows: StatementRow[] = [];
+  let nonExpense = 0;
   for (const r of raw) {
     const matchesExpenseSign = amountCol === -1 ? r.signedAmount > 0 : Math.sign(r.signedAmount) === expenseSign;
     if (!matchesExpenseSign) {
       // Opposite sign from the file's dominant convention — a deposit,
-      // payroll, refund, or transfer in. Not a bucketed expense.
-      skipped++;
+      // payroll, refund, or transfer in. Not a bucketed expense, by design
+      // rather than a parsing failure.
+      nonExpense++;
       continue;
     }
     const amount = Math.abs(r.signedAmount);
@@ -148,7 +152,7 @@ export function parseStatementCsv(text: string): { rows: StatementRow[]; skipped
     rows.push({ amount, description, occurredAt });
   }
 
-  return { rows, skipped };
+  return { rows, unreadable, nonExpense };
 }
 
 /** Stable id for de-duplicating the same statement row across re-imports (e.g. an overlapping date range). */

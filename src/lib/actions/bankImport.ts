@@ -16,7 +16,8 @@ async function requireSession() {
 export type ImportSummary = {
   imported: number;
   duplicates: number;
-  skippedRows: number;
+  unreadableRows: number;
+  nonExpenseRows: number;
   uncategorized: number;
 };
 
@@ -25,14 +26,24 @@ export type ImportSummary = {
  * its export columns differently, so parseStatementCsv() matches on common
  * aliases rather than one fixed layout — see that file if a particular
  * bank's export isn't recognized.
+ *
+ * Takes a single FormData (fields "accountId" and "file") rather than
+ * separate arguments — passing a bare File as one of several positional
+ * server-action arguments isn't reliably serializable when the action is
+ * invoked directly from client code (as opposed to a native <form action>);
+ * FormData is the documented, supported way to send a file either way.
  */
-export async function importStatementCsv(accountId: string, file: File): Promise<ImportSummary> {
+export async function importStatementCsv(formData: FormData): Promise<ImportSummary> {
   const session = await requireSession();
   const userId = (session.user as any)?.id ?? null;
 
+  const accountId = String(formData.get("accountId") ?? "");
+  const file = formData.get("file") as File | null;
+  if (!accountId || !file) throw new Error("Account and file are required");
+
   const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId } });
   const text = await file.text();
-  const { rows, skipped } = parseStatementCsv(text);
+  const { rows, unreadable, nonExpense } = parseStatementCsv(text);
 
   let imported = 0;
   let duplicates = 0;
@@ -83,5 +94,5 @@ export async function importStatementCsv(accountId: string, file: File): Promise
   revalidatePath("/");
   revalidatePath("/insights");
 
-  return { imported, duplicates, skippedRows: skipped, uncategorized };
+  return { imported, duplicates, unreadableRows: unreadable, nonExpenseRows: nonExpense, uncategorized };
 }
