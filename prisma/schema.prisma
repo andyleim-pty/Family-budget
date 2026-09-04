@@ -131,6 +131,11 @@ model Transaction {
   // AI confidence (0-1) in the bucket assignment, null for manual entries.
   aiConfidence Float?
   aiRawNote    String? // raw transcript/receipt text kept for audit + re-categorization
+  // Stable id for de-duplication on re-import: a bank/provider's own
+  // transaction id for a live feed, or a content hash of
+  // (account, date, amount, description) for a CSV statement import. Null
+  // for manual/WhatsApp entries, which have no re-import to dedupe against.
+  externalId String?
 
   bucket   Bucket? @relation(fields: [bucketId], references: [id])
   bucketId String?
@@ -147,6 +152,7 @@ model Transaction {
   @@index([bucketId])
   @@index([accountId])
   @@index([occurredAt])
+  @@unique([accountId, externalId])
 }
 
 /// A conversation thread with the budget assistant — one per WhatsApp phone

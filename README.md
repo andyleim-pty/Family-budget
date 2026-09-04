@@ -146,17 +146,33 @@ src/lib/conversations.ts     Conversation/ChatMessage persistence (per WhatsApp 
 src/lib/whatsapp/client.ts   WhatsApp Cloud API send + media download
 src/lib/whatsapp/ingest.ts   The end-to-end pipeline: message → AI → transaction or assistant reply
 src/lib/actions/*.ts         Server actions backing the web UI's forms and the assistant chat page
-src/lib/bank-feed/README.md  Where a live bank-feed sync (Basiq/Plaid) would plug in later
+src/lib/bank-feed/csv-import.ts  CSV statement parsing + de-dupe hash (any bank, any country)
+src/lib/actions/bankImport.ts   Server action: parse → categorize → insert as Transaction
+src/lib/bank-feed/README.md  What's implemented today + exactly how a live feed (Plaid, etc.) would plug in later
 src/app/*                    Pages: dashboard, insights, assistant, buckets, pockets, accounts, transactions, settings
 src/app/api/whatsapp/webhook Inbound WhatsApp webhook (GET verify, POST messages)
 src/app/api/cron/*           Bearer-token-guarded routes that trigger the daily/weekly digest send
 ```
 
+## Bank statement import
+
+The Transactions page has a **CSV import** card: export a statement from your bank's website and
+drop it in against one of your accounts. It recognizes common column-name variants (`Date`,
+`Description`/`Memo`/`Payee`, `Amount` or separate `Debit`/`Credit`) rather than needing one exact
+format, categorizes each row with the same AI matcher the WhatsApp pipeline uses, and skips rows
+you've already imported if a date range overlaps a previous upload. This works for any bank in any
+country — it's the practical option when a live feed isn't available (see below).
+
 ## Notes on what's intentionally out of scope (v1)
 
-- **Live bank-feed sync** (auto-importing every transaction from your actual bank) needs a
-  provider like Basiq or Plaid, real credentials, and a consent flow only you can set up — see
-  `src/lib/bank-feed/README.md` for the integration point the data model already supports.
-  Balances are entered manually for now.
+- **Live/automatic bank-feed sync** (a transaction shows up the moment it posts, no CSV needed)
+  needs a regulated open-banking aggregator in between (Plaid for US/Canada, Basiq/Frollo for
+  Australia, TrueLayer/Yapily for UK/EU, Belvo for Mexico/Colombia/Brazil) plus real credentials
+  and a consent flow only you can complete — not something buildable without your own account
+  there. **Panama has no such aggregator today** (checked Belvo's coverage directly — Mexico,
+  Colombia, Brazil only), so CSV import is the realistic path for a Panamanian account for the
+  foreseeable future, not just a stopgap. See `src/lib/bank-feed/README.md` for exactly how a live
+  feed (e.g. Plaid, for the US side) would plug into what's already built — it's additive, not a
+  redesign.
 - **Multi-currency conversion** — each transaction/account carries a currency code, but no FX
   conversion is applied in totals; keep everything in one currency unless you extend this.
