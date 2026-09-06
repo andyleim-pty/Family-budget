@@ -3,6 +3,7 @@ import { startOfMonth, endOfMonth, getDaysInMonth, getDate } from "date-fns";
 
 export type BucketStatus = {
   bucketId: string;
+  accountId: string;
   name: string;
   kind: string;
   color: string;
@@ -47,6 +48,7 @@ export async function getBucketStatuses(reference: Date = new Date()): Promise<B
 
     return {
       bucketId: b.id,
+      accountId: b.accountId,
       name: b.name,
       kind: b.kind,
       color: b.color,
@@ -125,4 +127,77 @@ export function suggestionFor(status: BucketStatus): string {
     return `${status.name} is close to its limit ($${remainingFmt} left) — worth keeping an eye on for the rest of the month.`;
   }
   return `${status.name} is on track with $${remainingFmt} left.`;
+}
+
+export type ExpenseImpact = {
+  matched: boolean;
+  bucketName: string;
+  remainingBefore: number;
+  remainingAfter: number;
+  /** How much of the expense the bucket can't cover on its own. */
+  overflow: number;
+  pace: BucketStatus["pace"];
+  percentOfMonthElapsed: number;
+  /** Other buckets on the same account with enough slack to absorb the overflow, best first. */
+  coverFromSiblings: { name: string; slack: number }[];
+  /** Savings pockets on the same account, for context only — spending from one is a goal tradeoff, not a free lunch. */
+  siblingPockets: { name: string; goalType: string; currentAmount: number }[];
+};
+
+/**
+ * The real arithmetic behind "if I buy this, what does it actually cost the
+ * household" — does the named bucket have room, and if not, which other
+ * allocation would effectively have to fund the difference this month.
+ * Used by the chat assistant; never invents numbers, only computes them.
+ */
+export async function assessExpenseImpact(
+  bucketName: string,
+  amount: number,
+  reference: Date = new Date()
+): Promise<ExpenseImpact> {
+  const statuses = await getBucketStatuses(reference);
+  const target = statuses.find((s) => s.name.toLowerCase() === bucketName.toLowerCase());
+
+  if (!target) {
+    return {
+      matched: false,
+      bucketName,
+      remainingBefore: 0,
+      remainingAfter: 0,
+      overflow: amount,
+      pace: "over-budget",
+      percentOfMonthElapsed: statuses[0]?.percentOfMonthElapsed ?? 0,
+      coverFromSiblings: [],
+      siblingPockets: [],
+    };
+  }
+
+  const remainingAfter = target.remaining - amount;
+  const overflow = Math.max(0, -remainingAfter);
+
+  const siblings = statuses
+    .filter((s) => s.bucketId !== target.bucketId && s.accountId === target.accountId && s.remaining > 0)
+    .sort((a, b) => b.remaining - a.remaining)
+    .map((s) => ({ name: s.name, slack: s.remaining }));
+
+  const pockets = await prisma.pocket.findMany({
+    where: { archived: false, accountId: target.accountId },
+    select: { name: true, goalType: true, currentAmount: true },
+  });
+
+  return {
+    matched: true,
+    bucketName: target.name,
+    remainingBefore: target.remaining,
+    remainingAfter,
+    overflow,
+    pace: target.pace,
+    percentOfMonthElapsed: target.percentOfMonthElapsed,
+    coverFromSiblings: overflow > 0 ? siblings : [],
+    siblingPockets: pockets.map((p) => ({
+      name: p.name,
+      goalType: p.goalType,
+      currentAmount: Number(p.currentAmount),
+    })),
+  };
 }

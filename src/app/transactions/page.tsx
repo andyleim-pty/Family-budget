@@ -2,6 +2,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import Nav from "@/components/Nav";
+import CsvImportForm from "@/components/CsvImportForm";
 import { createManualTransaction, deleteTransaction, recategorizeTransaction } from "@/lib/actions/transactions";
 
 const sourceLabels: Record<string, string> = {
@@ -9,12 +10,14 @@ const sourceLabels: Record<string, string> = {
   WHATSAPP_IMAGE: "📷 WhatsApp",
   WHATSAPP_AUDIO: "🎙️ WhatsApp",
   WHATSAPP_TEXT: "💬 WhatsApp",
-  IMPORT: "Import",
+  ASSISTANT_CHAT: "💬 Assistant",
+  IMPORT: "Statement import",
 };
 
 export default async function TransactionsPage() {
   const session = await getServerSession(authOptions);
   const buckets = await prisma.bucket.findMany({ where: { archived: false }, orderBy: { name: "asc" } });
+  const accounts = await prisma.account.findMany({ where: { archived: false }, orderBy: { name: "asc" } });
   const transactions = await prisma.transaction.findMany({
     orderBy: { occurredAt: "desc" },
     take: 100,
@@ -66,6 +69,16 @@ export default async function TransactionsPage() {
               </button>
             </div>
           </form>
+        </div>
+
+        <div className="card p-4">
+          <h2 className="font-semibold mb-1">Import a bank statement</h2>
+          <p className="text-xs text-gray-500 mb-3">
+            No live bank feed yet (see Settings) — export a CSV statement from your bank's site and
+            drop it in here. Column names vary by bank; most common exports are recognized
+            automatically. Already-imported rows are skipped if you re-upload an overlapping range.
+          </p>
+          <CsvImportForm accounts={accounts} />
         </div>
 
         <div className="card divide-y divide-gray-100">

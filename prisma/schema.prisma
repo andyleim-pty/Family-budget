@@ -34,6 +34,7 @@ model User {
   transactions        Transaction[]
   pocketContributions PocketContribution[]
   inboundMessages     InboundMessage[]
+  conversations       Conversation[]
 }
 
 /// A real-world bank/cash account. Buckets and Pockets are funded from one.
@@ -130,6 +131,11 @@ model Transaction {
   // AI confidence (0-1) in the bucket assignment, null for manual entries.
   aiConfidence Float?
   aiRawNote    String? // raw transcript/receipt text kept for audit + re-categorization
+  // Stable id for de-duplication on re-import: a bank/provider's own
+  // transaction id for a live feed, or a content hash of
+  // (account, date, amount, description) for a CSV statement import. Null
+  // for manual/WhatsApp entries, which have no re-import to dedupe against.
+  externalId String?
 
   bucket   Bucket? @relation(fields: [bucketId], references: [id])
   bucketId String?
@@ -146,6 +152,40 @@ model Transaction {
   @@index([bucketId])
   @@index([accountId])
   @@index([occurredAt])
+  @@unique([accountId, externalId])
+}
+
+/// A conversation thread with the budget assistant — one per WhatsApp phone
+/// number, or one per logged-in web user. Kept separate from InboundMessage
+/// (which tracks expense-ingestion messages) so a running chat has its own
+/// memory.
+model Conversation {
+  id        String   @id @default(cuid())
+  /// "WEB" | "WHATSAPP" — see src/lib/enums.ts
+  channel   String
+  user      User?    @relation(fields: [userId], references: [id])
+  userId    String?
+  // Set for WHATSAPP conversations before/without a linked User.
+  phone     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages ChatMessage[]
+
+  @@index([userId])
+  @@index([phone])
+}
+
+model ChatMessage {
+  id             String       @id @default(cuid())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversationId String
+  /// "user" | "assistant"
+  role           String
+  content        String
+  createdAt      DateTime     @default(now())
+
+  @@index([conversationId])
 }
 
 /// Raw record of an inbound WhatsApp message, so the AI ingestion pipeline

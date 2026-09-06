@@ -75,13 +75,15 @@ export default async function SettingsPage() {
         </div>
 
         <div className="card p-4">
-          <h2 className="font-semibold mb-2">Live bank feeds</h2>
+          <h2 className="font-semibold mb-2">Bank statements</h2>
           <p className="text-sm text-gray-600">
-            Account balances are entered manually for now. Automatic bank-feed sync (e.g. via
-            Basiq or Plaid) is a natural next step — accounts, buckets and pockets are already
-            modeled so a sync job can post transactions the same way WhatsApp does. See{" "}
+            Account balances are entered manually, and CSV statement import (Transactions page) is
+            the current way to bulk-load spending from a bank that isn't wired up live. Automatic,
+            always-on sync is a natural next step for US accounts specifically (via Plaid) — the
+            data model and de-duplication already work the same way the CSV importer does, so it's
+            mostly a new adapter, not a redesign. See{" "}
             <code className="text-xs bg-gray-100 px-1 py-0.5 rounded">src/lib/bank-feed/README.md</code>{" "}
-            for the integration point.
+            for exactly what that adapter would look like.
           </p>
         </div>
       </main>
