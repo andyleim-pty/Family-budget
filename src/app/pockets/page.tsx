@@ -7,9 +7,13 @@ import { POCKET_GOAL_TYPES, POCKET_GOAL_LABELS, type PocketGoalType } from "@/li
 
 export default async function PocketsPage() {
   const session = await getServerSession(authOptions);
-  const accounts = await prisma.account.findMany({ where: { archived: false }, orderBy: { name: "asc" } });
+  const householdId = (session?.user as any)?.householdId as string;
+  const accounts = await prisma.account.findMany({
+    where: { householdId, archived: false },
+    orderBy: { name: "asc" },
+  });
   const pockets = await prisma.pocket.findMany({
-    where: { archived: false },
+    where: { householdId, archived: false },
     orderBy: { createdAt: "asc" },
   });
 

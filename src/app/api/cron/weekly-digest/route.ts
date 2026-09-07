@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { buildWeeklyDigest, sendDigestToFamily } from "@/lib/digest";
+import { sendWeeklyDigests } from "@/lib/digest";
 
 // Hit by an external scheduler once a week (e.g. Monday morning). See
 // README.md "Proactive digests" for how to wire this up.
@@ -9,7 +9,6 @@ export async function GET(req: NextRequest) {
     return new NextResponse("Unauthorized", { status: 401 });
   }
 
-  const text = await buildWeeklyDigest();
-  const result = await sendDigestToFamily(text);
+  const result = await sendWeeklyDigests();
   return NextResponse.json({ ok: true, ...result });
 }

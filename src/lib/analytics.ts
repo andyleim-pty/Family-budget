@@ -24,19 +24,19 @@ import { getBucketStatuses } from "@/lib/budget";
 
 type Period = { from: Date; to: Date };
 
-async function spendInRange({ from, to }: Period) {
+async function spendInRange(householdId: string, { from, to }: Period) {
   return prisma.transaction.findMany({
-    where: { occurredAt: { gte: from, lte: to } },
+    where: { householdId, occurredAt: { gte: from, lte: to } },
     include: { bucket: true },
     orderBy: { occurredAt: "asc" },
   });
 }
 
 /** Total spend for each of the last `days` calendar days — feeds the daily-trend chart. */
-export async function getDailySeries(days = 30, reference: Date = new Date()) {
+export async function getDailySeries(householdId: string, days = 30, reference: Date = new Date()) {
   const from = startOfDay(new Date(reference.getTime() - (days - 1) * 86400000));
   const to = endOfDay(reference);
-  const txns = await spendInRange({ from, to });
+  const txns = await spendInRange(householdId, { from, to });
 
   const byDay = new Map<string, number>();
   for (const day of eachDayOfInterval({ start: from, end: to })) {
@@ -50,14 +50,17 @@ export async function getDailySeries(days = 30, reference: Date = new Date()) {
 }
 
 /** This week vs. last week, overall and per bucket — the weekly digest's core numbers. */
-export async function getWeeklyComparison(reference: Date = new Date()) {
+export async function getWeeklyComparison(householdId: string, reference: Date = new Date()) {
   const thisWeek = { from: startOfWeek(reference), to: endOfWeek(reference) };
   const lastWeek = {
     from: startOfWeek(subWeeks(reference, 1)),
     to: endOfWeek(subWeeks(reference, 1)),
   };
 
-  const [thisTx, lastTx] = await Promise.all([spendInRange(thisWeek), spendInRange(lastWeek)]);
+  const [thisTx, lastTx] = await Promise.all([
+    spendInRange(householdId, thisWeek),
+    spendInRange(householdId, lastWeek),
+  ]);
 
   const thisTotal = thisTx.reduce((s, t) => s + Number(t.amount), 0);
   const lastTotal = lastTx.reduce((s, t) => s + Number(t.amount), 0);
@@ -87,10 +90,10 @@ export async function getWeeklyComparison(reference: Date = new Date()) {
 }
 
 /** Yesterday's spend — the daily digest's core number. */
-export async function getDailySummary(reference: Date = new Date()) {
+export async function getDailySummary(householdId: string, reference: Date = new Date()) {
   const yesterday = new Date(reference.getTime() - 86400000);
   const range = { from: startOfDay(yesterday), to: endOfDay(yesterday) };
-  const txns = await spendInRange(range);
+  const txns = await spendInRange(householdId, range);
   const total = txns.reduce((s, t) => s + Number(t.amount), 0);
   const byBucket = new Map<string, number>();
   for (const t of txns) {
@@ -109,8 +112,8 @@ export async function getDailySummary(reference: Date = new Date()) {
 }
 
 /** Projects each bucket's month-end total from its spend pace so far this month. */
-export async function getMonthlyProjection(reference: Date = new Date()) {
-  const statuses = await getBucketStatuses(reference);
+export async function getMonthlyProjection(householdId: string, reference: Date = new Date()) {
+  const statuses = await getBucketStatuses(householdId, reference);
   const daysInMonth = getDaysInMonth(reference);
   const dayOfMonth = Math.max(1, differenceInCalendarDays(reference, startOfMonth(reference)) + 1);
 
@@ -129,8 +132,8 @@ export async function getMonthlyProjection(reference: Date = new Date()) {
   });
 }
 
-async function periodStats(period: Period, reference: Date) {
-  const txns = await spendInRange(period);
+async function periodStats(householdId: string, period: Period, reference: Date) {
+  const txns = await spendInRange(householdId, period);
   const total = txns.reduce((s, t) => s + Number(t.amount), 0);
   const byBucket = new Map<string, { total: number; color: string }>();
   for (const t of txns) {
@@ -155,15 +158,15 @@ async function periodStats(period: Period, reference: Date) {
 }
 
 /** Current quarter vs. the previous one. */
-export async function getQuarterlyStats(reference: Date = new Date()) {
+export async function getQuarterlyStats(householdId: string, reference: Date = new Date()) {
   const current = { from: startOfQuarter(reference), to: endOfQuarter(reference) };
   const previous = {
     from: startOfQuarter(subQuarters(reference, 1)),
     to: endOfQuarter(subQuarters(reference, 1)),
   };
   const [curr, prev] = await Promise.all([
-    periodStats(current, reference),
-    periodStats(previous, reference),
+    periodStats(householdId, current, reference),
+    periodStats(householdId, previous, reference),
   ]);
   return {
     label: `Q${Math.floor(reference.getMonth() / 3) + 1} ${reference.getFullYear()}`,
@@ -174,12 +177,12 @@ export async function getQuarterlyStats(reference: Date = new Date()) {
 }
 
 /** Current year vs. the previous one. */
-export async function getAnnualStats(reference: Date = new Date()) {
+export async function getAnnualStats(householdId: string, reference: Date = new Date()) {
   const current = { from: startOfYear(reference), to: endOfYear(reference) };
   const previous = { from: startOfYear(subYears(reference, 1)), to: endOfYear(subYears(reference, 1)) };
   const [curr, prev] = await Promise.all([
-    periodStats(current, reference),
-    periodStats(previous, reference),
+    periodStats(householdId, current, reference),
+    periodStats(householdId, previous, reference),
   ]);
   return {
     label: `${reference.getFullYear()}`,
@@ -204,6 +207,7 @@ export type Anomaly = {
  * to that bucket's historical mean + spread, not a fixed dollar cutoff.
  */
 export async function detectAnomalies(
+  householdId: string,
   { lookbackDays = 120, recentDays = 14 }: { lookbackDays?: number; recentDays?: number } = {},
   reference: Date = new Date()
 ): Promise<Anomaly[]> {
@@ -211,11 +215,11 @@ export async function detectAnomalies(
   const recentFrom = new Date(reference.getTime() - recentDays * 86400000);
 
   const history = await prisma.transaction.findMany({
-    where: { occurredAt: { gte: historyFrom, lt: recentFrom } },
+    where: { householdId, occurredAt: { gte: historyFrom, lt: recentFrom } },
     select: { amount: true, bucketId: true },
   });
   const recent = await prisma.transaction.findMany({
-    where: { occurredAt: { gte: recentFrom, lte: reference } },
+    where: { householdId, occurredAt: { gte: recentFrom, lte: reference } },
     include: { bucket: true },
   });
 
@@ -269,13 +273,16 @@ export type CashFlowProjection = {
  * the still-to-come spend implied by every bucket's current pace — the
  * "are we about to go negative" check.
  */
-export async function getCashFlowProjection(reference: Date = new Date()): Promise<CashFlowProjection[]> {
+export async function getCashFlowProjection(
+  householdId: string,
+  reference: Date = new Date()
+): Promise<CashFlowProjection[]> {
   const [accounts, projections] = await Promise.all([
-    prisma.account.findMany({ where: { archived: false } }),
-    getMonthlyProjection(reference),
+    prisma.account.findMany({ where: { householdId, archived: false } }),
+    getMonthlyProjection(householdId, reference),
   ]);
   const bucketAccountIds = await prisma.bucket.findMany({
-    where: { archived: false },
+    where: { householdId, archived: false },
     select: { id: true, accountId: true },
   });
   const accountIdByBucket = new Map(bucketAccountIds.map((b) => [b.id, b.accountId]));
@@ -311,8 +318,11 @@ export type ReallocationSuggestion = {
  * re-evaluating the budget" ask, done as an ongoing nudge rather than a
  * one-off setup step.
  */
-export async function suggestReallocations(reference: Date = new Date()): Promise<ReallocationSuggestion[]> {
-  const buckets = await prisma.bucket.findMany({ where: { archived: false } });
+export async function suggestReallocations(
+  householdId: string,
+  reference: Date = new Date()
+): Promise<ReallocationSuggestion[]> {
+  const buckets = await prisma.bucket.findMany({ where: { householdId, archived: false } });
   const suggestions: ReallocationSuggestion[] = [];
 
   for (const bucket of buckets) {
@@ -321,7 +331,7 @@ export async function suggestReallocations(reference: Date = new Date()): Promis
       const monthRef = subMonths(reference, i);
       const range = { from: startOfMonth(monthRef), to: endOfMonth(monthRef) };
       const txns = await prisma.transaction.findMany({
-        where: { bucketId: bucket.id, occurredAt: { gte: range.from, lte: range.to } },
+        where: { householdId, bucketId: bucket.id, occurredAt: { gte: range.from, lte: range.to } },
         select: { amount: true },
       });
       monthlyTotals.push(txns.reduce((s, t) => s + Number(t.amount), 0));

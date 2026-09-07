@@ -1,17 +1,10 @@
 "use server";
 
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { requireSessionUser } from "@/lib/household";
 import { parseStatementCsv, statementRowExternalId } from "@/lib/bank-feed/csv-import";
 import { categorizeText } from "@/lib/ai/categorize";
 import { revalidatePath } from "next/cache";
-
-async function requireSession() {
-  const session = await getServerSession(authOptions);
-  if (!session) throw new Error("Not authenticated");
-  return session;
-}
 
 export type ImportSummary = {
   imported: number;
@@ -34,14 +27,14 @@ export type ImportSummary = {
  * FormData is the documented, supported way to send a file either way.
  */
 export async function importStatementCsv(formData: FormData): Promise<ImportSummary> {
-  const session = await requireSession();
-  const userId = (session.user as any)?.id ?? null;
+  const { userId, householdId } = await requireSessionUser();
 
   const accountId = String(formData.get("accountId") ?? "");
   const file = formData.get("file") as File | null;
   if (!accountId || !file) throw new Error("Account and file are required");
 
-  const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId } });
+  const account = await prisma.account.findFirst({ where: { id: accountId, householdId } });
+  if (!account) throw new Error("Account not found");
   const text = await file.text();
   const { rows, unreadable, nonExpense } = parseStatementCsv(text);
 
@@ -61,7 +54,7 @@ export async function importStatementCsv(formData: FormData): Promise<ImportSumm
     let confidence: number | null = null;
     let isMicro = false;
     try {
-      const result = await categorizeText(`${row.description} $${row.amount.toFixed(2)}`);
+      const result = await categorizeText(householdId, `${row.description} $${row.amount.toFixed(2)}`);
       bucketId = result.bucketId;
       confidence = result.confidence;
       isMicro = result.isMicro;
@@ -74,6 +67,7 @@ export async function importStatementCsv(formData: FormData): Promise<ImportSumm
 
     await prisma.transaction.create({
       data: {
+        householdId,
         amount: row.amount,
         currency: account.currency,
         merchant: row.description,

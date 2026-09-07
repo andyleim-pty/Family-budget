@@ -2,18 +2,11 @@
 
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
+import { requireHouseholdId, requireSessionUser } from "@/lib/household";
 import type { PocketGoalType } from "@/lib/enums";
 
-async function requireSession() {
-  const session = await getServerSession(authOptions);
-  if (!session) throw new Error("Not authenticated");
-  return session;
-}
-
 export async function createPocket(formData: FormData) {
-  await requireSession();
+  const householdId = await requireHouseholdId();
   const name = String(formData.get("name") ?? "").trim();
   const goalType = String(formData.get("goalType") ?? "OTHER") as PocketGoalType;
   const targetAmountRaw = formData.get("targetAmount");
@@ -24,28 +17,29 @@ export async function createPocket(formData: FormData) {
   const accountId = String(formData.get("accountId") ?? "");
   if (!name || !accountId) throw new Error("Name and account are required");
 
+  const account = await prisma.account.findFirst({ where: { id: accountId, householdId } });
+  if (!account) throw new Error("Account not found");
+
   await prisma.pocket.create({
-    data: { name, goalType, targetAmount, targetDate, monthlyContribution, accountId },
+    data: { householdId, name, goalType, targetAmount, targetDate, monthlyContribution, accountId },
   });
   revalidatePath("/pockets");
   revalidatePath("/");
 }
 
 export async function contributeToPocket(formData: FormData) {
-  const session = await requireSession();
+  const { userId, householdId } = await requireSessionUser();
   const pocketId = String(formData.get("pocketId") ?? "");
   const amount = Number(formData.get("amount") ?? 0);
   const note = String(formData.get("note") ?? "").trim() || null;
   if (!pocketId || !amount) throw new Error("Pocket and amount are required");
 
+  const pocket = await prisma.pocket.findFirst({ where: { id: pocketId, householdId } });
+  if (!pocket) throw new Error("Pocket not found");
+
   await prisma.$transaction([
     prisma.pocketContribution.create({
-      data: {
-        pocketId,
-        amount,
-        note,
-        userId: (session.user as any)?.id ?? null,
-      },
+      data: { pocketId, amount, note, userId },
     }),
     prisma.pocket.update({
       where: { id: pocketId },
@@ -57,8 +51,12 @@ export async function contributeToPocket(formData: FormData) {
 }
 
 export async function archivePocket(id: string) {
-  await requireSession();
-  await prisma.pocket.update({ where: { id }, data: { archived: true } });
+  const householdId = await requireHouseholdId();
+  const { count } = await prisma.pocket.updateMany({
+    where: { id, householdId },
+    data: { archived: true },
+  });
+  if (count === 0) throw new Error("Pocket not found");
   revalidatePath("/pockets");
   revalidatePath("/");
 }

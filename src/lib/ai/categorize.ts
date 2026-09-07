@@ -48,9 +48,9 @@ function extractionTool(bucketList: string) {
   };
 }
 
-async function activeBuckets() {
+async function activeBuckets(householdId: string) {
   return prisma.bucket.findMany({
-    where: { archived: false },
+    where: { householdId, archived: false },
     select: { id: true, name: true, description: true, kind: true, microThreshold: true },
   });
 }
@@ -61,8 +61,12 @@ function bucketListDescription(buckets: Awaited<ReturnType<typeof activeBuckets>
     .join(", ");
 }
 
-async function runTool(systemPrompt: string, userContent: Anthropic.MessageParam["content"]) {
-  const buckets = await activeBuckets();
+async function runTool(
+  householdId: string,
+  systemPrompt: string,
+  userContent: Anthropic.MessageParam["content"]
+) {
+  const buckets = await activeBuckets(householdId);
   const bucketList = bucketListDescription(buckets);
 
   const message = await client().messages.create({
@@ -106,8 +110,12 @@ message isn't actually about an expense, set bucket_name to null and explain bri
 parking, small taps) when a dedicated one exists. Be decisive — this runs unattended.`;
 
 /** Categorize a receipt photo (base64-encoded image). */
-export async function categorizeImage(base64: string, mediaType: string): Promise<CategorizationResult> {
-  return runTool(SYSTEM_PROMPT, [
+export async function categorizeImage(
+  householdId: string,
+  base64: string,
+  mediaType: string
+): Promise<CategorizationResult> {
+  return runTool(householdId, SYSTEM_PROMPT, [
     {
       type: "image",
       source: { type: "base64", media_type: mediaType as any, data: base64 },
@@ -120,8 +128,8 @@ export async function categorizeImage(base64: string, mediaType: string): Promis
 }
 
 /** Categorize a plain-text description (typed message, or a voice-note transcript). */
-export async function categorizeText(text: string): Promise<CategorizationResult> {
-  return runTool(SYSTEM_PROMPT, [
+export async function categorizeText(householdId: string, text: string): Promise<CategorizationResult> {
+  return runTool(householdId, SYSTEM_PROMPT, [
     {
       type: "text",
       text: `WhatsApp message describing an expense: "${text}"`,

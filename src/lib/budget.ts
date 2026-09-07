@@ -19,7 +19,10 @@ export type BucketStatus = {
 };
 
 /** Spend-vs-budget for every active bucket for the given month (defaults to now). */
-export async function getBucketStatuses(reference: Date = new Date()): Promise<BucketStatus[]> {
+export async function getBucketStatuses(
+  householdId: string,
+  reference: Date = new Date()
+): Promise<BucketStatus[]> {
   const from = startOfMonth(reference);
   const to = endOfMonth(reference);
   const daysInMonth = getDaysInMonth(reference);
@@ -27,7 +30,7 @@ export async function getBucketStatuses(reference: Date = new Date()): Promise<B
   const percentOfMonthElapsed = Math.min(100, Math.round((dayOfMonth / daysInMonth) * 100));
 
   const buckets = await prisma.bucket.findMany({
-    where: { archived: false },
+    where: { householdId, archived: false },
     include: {
       transactions: {
         where: { occurredAt: { gte: from, lte: to } },
@@ -66,8 +69,8 @@ export async function getBucketStatuses(reference: Date = new Date()): Promise<B
 }
 
 /** Household-wide summary used by the dashboard and by the WhatsApp quick-reply. */
-export async function getHouseholdSummary(reference: Date = new Date()) {
-  const buckets = await getBucketStatuses(reference);
+export async function getHouseholdSummary(householdId: string, reference: Date = new Date()) {
+  const buckets = await getBucketStatuses(householdId, reference);
   const totalBudget = buckets.reduce((s, b) => s + b.monthlyLimit, 0);
   const totalSpent = buckets.reduce((s, b) => s + b.spent, 0);
   const totalMicro = buckets.reduce((s, b) => s + b.microSpend, 0);
@@ -75,8 +78,8 @@ export async function getHouseholdSummary(reference: Date = new Date()) {
   const overBudgetBuckets = buckets.filter((b) => b.pace === "over-budget");
   const atRiskBuckets = buckets.filter((b) => b.pace === "at-risk");
 
-  const pockets = await prisma.pocket.findMany({ where: { archived: false } });
-  const accounts = await prisma.account.findMany({ where: { archived: false } });
+  const pockets = await prisma.pocket.findMany({ where: { householdId, archived: false } });
+  const accounts = await prisma.account.findMany({ where: { householdId, archived: false } });
 
   return {
     buckets,
@@ -151,11 +154,12 @@ export type ExpenseImpact = {
  * Used by the chat assistant; never invents numbers, only computes them.
  */
 export async function assessExpenseImpact(
+  householdId: string,
   bucketName: string,
   amount: number,
   reference: Date = new Date()
 ): Promise<ExpenseImpact> {
-  const statuses = await getBucketStatuses(reference);
+  const statuses = await getBucketStatuses(householdId, reference);
   const target = statuses.find((s) => s.name.toLowerCase() === bucketName.toLowerCase());
 
   if (!target) {
@@ -181,7 +185,7 @@ export async function assessExpenseImpact(
     .map((s) => ({ name: s.name, slack: s.remaining }));
 
   const pockets = await prisma.pocket.findMany({
-    where: { archived: false, accountId: target.accountId },
+    where: { householdId, archived: false, accountId: target.accountId },
     select: { name: true, goalType: true, currentAmount: true },
   });
 

@@ -23,7 +23,8 @@ function ConfigRow({ label, ok, hint }: { label: string; ok: boolean; hint: stri
 
 export default async function SettingsPage() {
   const session = await getServerSession(authOptions);
-  const users = await prisma.user.findMany({ orderBy: { createdAt: "asc" } });
+  const householdId = (session?.user as any)?.householdId as string;
+  const users = await prisma.user.findMany({ where: { householdId }, orderBy: { createdAt: "asc" } });
 
   return (
     <div>

@@ -16,9 +16,17 @@ const sourceLabels: Record<string, string> = {
 
 export default async function TransactionsPage() {
   const session = await getServerSession(authOptions);
-  const buckets = await prisma.bucket.findMany({ where: { archived: false }, orderBy: { name: "asc" } });
-  const accounts = await prisma.account.findMany({ where: { archived: false }, orderBy: { name: "asc" } });
+  const householdId = (session?.user as any)?.householdId as string;
+  const buckets = await prisma.bucket.findMany({
+    where: { householdId, archived: false },
+    orderBy: { name: "asc" },
+  });
+  const accounts = await prisma.account.findMany({
+    where: { householdId, archived: false },
+    orderBy: { name: "asc" },
+  });
   const transactions = await prisma.transaction.findMany({
+    where: { householdId },
     orderBy: { occurredAt: "desc" },
     take: 100,
     include: { bucket: true, loggedBy: true },

@@ -8,8 +8,12 @@ import { getBucketStatuses } from "@/lib/budget";
 
 export default async function BucketsPage() {
   const session = await getServerSession(authOptions);
-  const accounts = await prisma.account.findMany({ where: { archived: false }, orderBy: { name: "asc" } });
-  const statuses = await getBucketStatuses();
+  const householdId = (session?.user as any)?.householdId as string;
+  const accounts = await prisma.account.findMany({
+    where: { householdId, archived: false },
+    orderBy: { name: "asc" },
+  });
+  const statuses = await getBucketStatuses(householdId);
 
   return (
     <div>

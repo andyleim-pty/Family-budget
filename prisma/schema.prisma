@@ -1,33 +1,62 @@
 // Family Budget Tracker — data model
 //
-// Default datasource is SQLite for zero-config local/self-hosted use.
-// For production, switch provider to "postgresql" and point DATABASE_URL
-// at a managed Postgres instance (Neon, Supabase, RDS, etc.) — no schema
-// changes required.
+// Postgres (works well on Vercel + a managed provider like Neon or Supabase,
+// since serverless hosting doesn't give you a persistent filesystem for
+// SQLite). Point DATABASE_URL at your instance.
 //
-// NOTE: SQLite's Prisma connector doesn't support native enums, so
-// enum-like fields below are plain `String` columns. The allowed values
-// for each are defined as TypeScript union types in src/lib/enums.ts —
-// treat that file as the source of truth.
+// NOTE: enum-like fields below are plain `String` columns rather than native
+// Prisma enums — a holdover from when this schema targeted SQLite (whose
+// connector doesn't support enums) that was kept for consistency when the
+// datasource moved to Postgres. The allowed values for each are defined as
+// TypeScript union types in src/lib/enums.ts — treat that file as the source
+// of truth.
+//
+// Every household's data is isolated by `householdId` (see Household below).
+// There's no self-serve signup yet — households are created via the seed
+// script — but the isolation itself is already real: nothing queries across
+// households, so this is the foundation multi-family/billing support would
+// build on top of, not a retrofit. See README.md "Multiple households".
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+/// A billing/tenancy boundary — one per family using the app. Everything
+/// else in the schema belongs to exactly one household, and every query in
+/// the app is expected to filter by it (see src/lib/household.ts).
+model Household {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+
+  users           User[]
+  accounts        Account[]
+  buckets         Bucket[]
+  pockets         Pocket[]
+  transactions    Transaction[]
+  conversations   Conversation[]
+  inboundMessages InboundMessage[]
 }
 
 /// A family member who can log in and/or send WhatsApp messages.
 model User {
   id           String   @id @default(cuid())
+  household    Household @relation(fields: [householdId], references: [id])
+  householdId  String
   name         String
   email        String   @unique
   passwordHash String
   /// "OWNER" | "PARTNER" — see src/lib/enums.ts
   role         String   @default("PARTNER")
-  // E.164 phone number used to identify inbound WhatsApp messages, e.g. +61412345678
+  // E.164 phone number used to identify inbound WhatsApp messages, e.g.
+  // +61412345678. Globally unique (one real phone belongs to one person,
+  // hence one household) — this is how an inbound WhatsApp message gets
+  // resolved to a household without the sender saying who they are.
   whatsappPhone String? @unique
   createdAt    DateTime @default(now())
 
@@ -35,11 +64,15 @@ model User {
   pocketContributions PocketContribution[]
   inboundMessages     InboundMessage[]
   conversations       Conversation[]
+
+  @@index([householdId])
 }
 
 /// A real-world bank/cash account. Buckets and Pockets are funded from one.
 model Account {
   id          String   @id @default(cuid())
+  household   Household @relation(fields: [householdId], references: [id])
+  householdId String
   name        String
   institution String?
   /// "CHECKING" | "SAVINGS" | "CREDIT_CARD" | "CASH" — see src/lib/enums.ts
@@ -54,12 +87,16 @@ model Account {
   buckets      Bucket[]
   pockets      Pocket[]
   transactions Transaction[]
+
+  @@index([householdId])
 }
 
 /// A recurring monthly budget category ("envelope"). Spending against a
 /// bucket is compared to `monthlyLimit` for the current calendar month.
 model Bucket {
   id          String  @id @default(cuid())
+  household   Household @relation(fields: [householdId], references: [id])
+  householdId String
   name        String
   description String?
   /// "ESSENTIAL" | "DISCRETIONARY" | "MICRO" — see src/lib/enums.ts
@@ -78,6 +115,7 @@ model Bucket {
   transactions Transaction[]
 
   @@index([accountId])
+  @@index([householdId])
 }
 
 /// A savings "sinking fund" pocket for things that are irregular but
@@ -85,6 +123,8 @@ model Bucket {
 /// over time via contributions rather than resetting monthly.
 model Pocket {
   id           String    @id @default(cuid())
+  household    Household @relation(fields: [householdId], references: [id])
+  householdId  String
   name         String
   /// "HOLIDAY" | "FESTIVITY" | "TRIP" | "EMERGENCY" | "OTHER" — see src/lib/enums.ts
   goalType     String    @default("OTHER")
@@ -101,6 +141,7 @@ model Pocket {
   contributions PocketContribution[]
 
   @@index([accountId])
+  @@index([householdId])
 }
 
 model PocketContribution {
@@ -120,12 +161,18 @@ model PocketContribution {
 /// a Bucket and drawn from an Account.
 model Transaction {
   id         String   @id @default(cuid())
+  // Denormalized from the Account/Bucket's household: every household-scoped
+  // query filters directly on this column rather than relying on a join, so
+  // one missed join condition elsewhere can't leak a transaction across
+  // households.
+  household   Household @relation(fields: [householdId], references: [id])
+  householdId String
   amount     Decimal
   currency   String   @default("AUD")
   merchant   String?
   note       String?
   occurredAt DateTime @default(now())
-  /// "MANUAL" | "WHATSAPP_IMAGE" | "WHATSAPP_AUDIO" | "WHATSAPP_TEXT" | "IMPORT"
+  /// "MANUAL" | "WHATSAPP_IMAGE" | "WHATSAPP_AUDIO" | "WHATSAPP_TEXT" | "ASSISTANT_CHAT" | "IMPORT"
   source     String   @default("MANUAL")
   isMicro    Boolean  @default(false)
   // AI confidence (0-1) in the bucket assignment, null for manual entries.
@@ -152,6 +199,7 @@ model Transaction {
   @@index([bucketId])
   @@index([accountId])
   @@index([occurredAt])
+  @@index([householdId])
   @@unique([accountId, externalId])
 }
 
@@ -160,7 +208,9 @@ model Transaction {
 /// (which tracks expense-ingestion messages) so a running chat has its own
 /// memory.
 model Conversation {
-  id        String   @id @default(cuid())
+  id          String   @id @default(cuid())
+  household   Household @relation(fields: [householdId], references: [id])
+  householdId String
   /// "WEB" | "WHATSAPP" — see src/lib/enums.ts
   channel   String
   user      User?    @relation(fields: [userId], references: [id])
@@ -174,6 +224,7 @@ model Conversation {
 
   @@index([userId])
   @@index([phone])
+  @@index([householdId])
 }
 
 model ChatMessage {
@@ -193,6 +244,10 @@ model ChatMessage {
 /// against the most recent pending message from that sender.
 model InboundMessage {
   id           String  @id @default(cuid())
+  // Null until the sending phone number resolves to a linked User — an
+  // unrecognized number can't be attributed to a household.
+  household    Household? @relation(fields: [householdId], references: [id])
+  householdId  String?
   waMessageId  String  @unique
   fromPhone    String
   user         User?   @relation(fields: [userId], references: [id])
@@ -205,7 +260,7 @@ model InboundMessage {
   // reply from the sender (e.g. "2") so the confirmation can complete the
   // transaction without re-running the AI extraction.
   extractedJson String?
-  /// "RECEIVED" | "PROCESSING" | "NEEDS_CONFIRMATION" | "CONFIRMED" | "FAILED"
+  /// "RECEIVED" | "PROCESSING" | "NEEDS_CONFIRMATION" | "CONFIRMED" | "ANSWERED" | "FAILED"
   status       String  @default("RECEIVED")
   errorMessage String?
 
@@ -214,4 +269,6 @@ model InboundMessage {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([householdId])
 }

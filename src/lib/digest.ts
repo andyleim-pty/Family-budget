@@ -7,11 +7,11 @@ function money(n: number) {
 }
 
 /** The proactive daily push: yesterday's spend, anything unusual, and any cash-flow risk. */
-export async function buildDailyDigest(reference: Date = new Date()): Promise<string> {
+export async function buildDailyDigest(householdId: string, reference: Date = new Date()): Promise<string> {
   const [summary, anomalies, cashFlow] = await Promise.all([
-    getDailySummary(reference),
-    detectAnomalies({ recentDays: 1 }, reference),
-    getCashFlowProjection(reference),
+    getDailySummary(householdId, reference),
+    detectAnomalies(householdId, { recentDays: 1 }, reference),
+    getCashFlowProjection(householdId, reference),
   ]);
 
   const lines: string[] = [`📊 *Yesterday:* ${money(summary.total)} across ${summary.count} transaction${summary.count === 1 ? "" : "s"}.`];
@@ -38,10 +38,10 @@ export async function buildDailyDigest(reference: Date = new Date()): Promise<st
 }
 
 /** The proactive weekly push: this week vs last week, and month-end projections at risk. */
-export async function buildWeeklyDigest(reference: Date = new Date()): Promise<string> {
+export async function buildWeeklyDigest(householdId: string, reference: Date = new Date()): Promise<string> {
   const [weekly, monthly] = await Promise.all([
-    getWeeklyComparison(reference),
-    getMonthlyProjection(reference),
+    getWeeklyComparison(householdId, reference),
+    getMonthlyProjection(householdId, reference),
   ]);
 
   const changeText =
@@ -69,11 +69,49 @@ export async function buildWeeklyDigest(reference: Date = new Date()): Promise<s
   return lines.join("\n");
 }
 
-/** Sends a digest to every family member who has a WhatsApp number linked. */
-export async function sendDigestToFamily(text: string) {
-  const users = await prisma.user.findMany({ where: { whatsappPhone: { not: null } } });
+/** Sends a digest to every member of one household who has a WhatsApp number linked. */
+async function sendDigestToHousehold(householdId: string, text: string) {
+  const users = await prisma.user.findMany({ where: { householdId, whatsappPhone: { not: null } } });
   const results = await Promise.allSettled(
     users.map((u) => sendWhatsAppText(u.whatsappPhone as string, text))
   );
   return { sentTo: users.length, failures: results.filter((r) => r.status === "rejected").length };
+}
+
+/** Every household with at least one WhatsApp-linked member — what the cron routes iterate over. */
+async function householdsWithWhatsApp(): Promise<string[]> {
+  const users = await prisma.user.findMany({
+    where: { whatsappPhone: { not: null } },
+    select: { householdId: true },
+    distinct: ["householdId"],
+  });
+  return users.map((u) => u.householdId);
+}
+
+/** Builds and sends the daily digest to every household that has WhatsApp set up. */
+export async function sendDailyDigests(reference: Date = new Date()) {
+  const householdIds = await householdsWithWhatsApp();
+  let sentTo = 0;
+  let failures = 0;
+  for (const householdId of householdIds) {
+    const text = await buildDailyDigest(householdId, reference);
+    const result = await sendDigestToHousehold(householdId, text);
+    sentTo += result.sentTo;
+    failures += result.failures;
+  }
+  return { households: householdIds.length, sentTo, failures };
+}
+
+/** Builds and sends the weekly digest to every household that has WhatsApp set up. */
+export async function sendWeeklyDigests(reference: Date = new Date()) {
+  const householdIds = await householdsWithWhatsApp();
+  let sentTo = 0;
+  let failures = 0;
+  for (const householdId of householdIds) {
+    const text = await buildWeeklyDigest(householdId, reference);
+    const result = await sendDigestToHousehold(householdId, text);
+    sentTo += result.sentTo;
+    failures += result.failures;
+  }
+  return { households: householdIds.length, sentTo, failures };
 }

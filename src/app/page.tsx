@@ -9,8 +9,9 @@ import Link from "next/link";
 
 export default async function DashboardPage() {
   const session = await getServerSession(authOptions);
-  const summary = await getHouseholdSummary();
-  const cashFlow = await getCashFlowProjection();
+  const householdId = (session?.user as any)?.householdId as string;
+  const summary = await getHouseholdSummary(householdId);
+  const cashFlow = await getCashFlowProjection(householdId);
   const atRiskAccounts = cashFlow.filter((c) => c.atRisk);
 
   return (

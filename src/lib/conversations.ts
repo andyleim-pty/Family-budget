@@ -4,20 +4,26 @@ import type { ConversationChannel, ChatRole } from "@/lib/enums";
 const HISTORY_LIMIT = 20; // messages of context sent to the model per turn
 
 export async function getOrCreateConversation(opts: {
+  householdId: string;
   channel: ConversationChannel;
   userId?: string | null;
   phone?: string | null;
 }) {
   const where =
     opts.channel === "WHATSAPP"
-      ? { channel: "WHATSAPP", phone: opts.phone ?? undefined }
-      : { channel: "WEB", userId: opts.userId ?? undefined };
+      ? { householdId: opts.householdId, channel: "WHATSAPP", phone: opts.phone ?? undefined }
+      : { householdId: opts.householdId, channel: "WEB", userId: opts.userId ?? undefined };
 
   const existing = await prisma.conversation.findFirst({ where, orderBy: { updatedAt: "desc" } });
   if (existing) return existing;
 
   return prisma.conversation.create({
-    data: { channel: opts.channel, userId: opts.userId ?? null, phone: opts.phone ?? null },
+    data: {
+      householdId: opts.householdId,
+      channel: opts.channel,
+      userId: opts.userId ?? null,
+      phone: opts.phone ?? null,
+    },
   });
 }
 

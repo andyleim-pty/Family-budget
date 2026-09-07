@@ -7,8 +7,9 @@ import { ACCOUNT_TYPES } from "@/lib/enums";
 
 export default async function AccountsPage() {
   const session = await getServerSession(authOptions);
+  const householdId = (session?.user as any)?.householdId as string;
   const accounts = await prisma.account.findMany({
-    where: { archived: false },
+    where: { householdId, archived: false },
     orderBy: { createdAt: "asc" },
     include: { buckets: true, pockets: true },
   });

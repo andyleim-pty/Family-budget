@@ -50,17 +50,21 @@ budget-status reply.
 
 ## Stack
 
-Next.js 14 (App Router) + TypeScript + Tailwind, Prisma + SQLite (swap to Postgres for
-production by changing one line), NextAuth credentials auth, Anthropic Claude for
-categorization/vision, OpenAI Whisper for voice transcription, WhatsApp Cloud API for messaging.
+Next.js 14 (App Router) + TypeScript + Tailwind, Prisma + Postgres, NextAuth credentials auth,
+Anthropic Claude for categorization/vision, OpenAI Whisper for voice transcription, WhatsApp
+Cloud API for messaging. Deploys to Vercel.
 
 ## Getting started
 
+Needs a Postgres database — for local dev either run one yourself (`docker run -e
+POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:16`) or just use a free Neon/Supabase project for
+both dev and production (same connection string shape, one less thing to keep in sync).
+
 ```bash
 npm install
-cp .env.example .env       # then fill in the values below
-npx prisma migrate dev     # creates dev.db and applies the schema
-npm run db:seed            # creates your two logins + starter buckets/pockets
+cp .env.example .env       # then fill in the values below, including DATABASE_URL
+npx prisma migrate dev     # applies the schema
+npm run db:seed            # creates your household + two logins + starter buckets/pockets
 npm run dev
 ```
 
@@ -72,7 +76,8 @@ Open http://localhost:3000 and sign in with the `OWNER_EMAIL` / `OWNER_PASSWORD`
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `DATABASE_URL` | yes | `file:./dev.db` for SQLite (default). Point at Postgres for production and change `provider` in `prisma/schema.prisma`. |
+| `DATABASE_URL` | yes | Postgres connection string — same one for local dev and production if you use Neon/Supabase for both. |
+| `HOUSEHOLD_NAME` | no | Used only by `npm run db:seed`; defaults to "Our household". |
 | `NEXTAUTH_SECRET` | yes | `openssl rand -base64 32` |
 | `NEXTAUTH_URL` | yes | Your app's base URL |
 | `OWNER_*` / `PARTNER_*` | yes (for seeding) | The two family logins + WhatsApp numbers, in `.env` before running `npm run db:seed` |
@@ -87,6 +92,44 @@ Open http://localhost:3000 and sign in with the `OWNER_EMAIL` / `OWNER_PASSWORD`
 The app runs and is fully usable from the web UI with none of the AI/WhatsApp keys set —
 those three integrations degrade gracefully (Settings page shows what's configured). The
 assistant chat and the WhatsApp expense pipeline share the same `ANTHROPIC_API_KEY`.
+
+## Deploying to Vercel
+
+1. Push this repo to GitHub, then import it in the [Vercel dashboard](https://vercel.com/new) —
+   it auto-detects Next.js, no config needed.
+2. Create a Postgres database — [Neon](https://neon.tech) or [Supabase](https://supabase.com)
+   both have a free tier that's plenty for a household. Copy its connection string.
+3. In the Vercel project's **Settings → Environment Variables**, add everything from
+   `.env.example` with real values: `DATABASE_URL` (from step 2), `NEXTAUTH_SECRET`
+   (`openssl rand -base64 32`), `NEXTAUTH_URL` (your Vercel URL, e.g.
+   `https://your-app.vercel.app`), the `OWNER_*`/`PARTNER_*` seed values, `ANTHROPIC_API_KEY`,
+   `CRON_SECRET`, and the WhatsApp variables once you've done the WhatsApp setup below.
+4. Deploy. Then run the schema + seed **once** against the production database — easiest from
+   your own machine with `DATABASE_URL` temporarily set to the production connection string:
+   ```bash
+   DATABASE_URL="<production connection string>" npx prisma migrate deploy
+   DATABASE_URL="<production connection string>" npm run db:seed
+   ```
+5. Log in at your Vercel URL with the `OWNER_EMAIL`/`OWNER_PASSWORD` you set, and change the
+   password.
+6. Point WhatsApp's webhook (below) at `https://your-app.vercel.app/api/whatsapp/webhook`, and
+   `vercel.json`'s cron jobs (see "Proactive digests" below) start firing automatically — no
+   extra setup on Vercel's side.
+
+Every future `git push` to the connected branch redeploys automatically; `prisma migrate deploy`
+only needs re-running when the schema changes.
+
+## Multiple households
+
+Every table is scoped by `householdId` (see `Household` in `prisma/schema.prisma`), and every
+query in the app filters by it — so a second family's data is already fully isolated from yours
+in the same database, and mutations are checked too (an id belonging to another household is
+treated as not found, not silently updated). What's *not* built yet is the product surface to
+actually onboard one: self-serve signup, a way to invite a second household, and billing. Right
+now the only way to create a household is `npm run db:seed` (or by hand in the database) — see the
+PR/commit history for the household-scoping work if you pick this back up, since the reasoning for
+what's deliberately deferred (multi-number WhatsApp routing via a Business Solution Provider like
+Twilio/360dialog, in particular) is there.
 
 ## WhatsApp setup
 
@@ -133,8 +176,9 @@ page load.
 ## Project layout
 
 ```
-prisma/schema.prisma        Data model (Users, Accounts, Buckets, Pockets, Transactions, InboundMessage, Conversation/ChatMessage)
-prisma/seed.ts               Creates the two family logins + starter buckets/pockets
+prisma/schema.prisma        Data model (Household, Users, Accounts, Buckets, Pockets, Transactions, InboundMessage, Conversation/ChatMessage)
+prisma/seed.ts               Creates a household + the two family logins + starter buckets/pockets
+src/lib/household.ts         requireHouseholdId() / requireSessionUser() — every server action and page starts here
 src/lib/budget.ts            Spend-vs-budget calculations, suggestion copy, assessExpenseImpact (the chat's cross-bucket math)
 src/lib/analytics.ts         Daily/weekly/monthly/quarterly/annual stats, anomaly detection, cash-flow projection, reallocation suggestions
 src/lib/digest.ts            Builds the WhatsApp digest text from src/lib/analytics.ts

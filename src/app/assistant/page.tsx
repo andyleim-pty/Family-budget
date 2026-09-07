@@ -7,7 +7,9 @@ import { getOrCreateConversation, getRecentMessages } from "@/lib/conversations"
 export default async function AssistantPage() {
   const session = await getServerSession(authOptions);
   const userId = (session?.user as any)?.id as string | undefined;
-  const conversation = userId ? await getOrCreateConversation({ channel: "WEB", userId }) : null;
+  const householdId = (session?.user as any)?.householdId as string | undefined;
+  const conversation =
+    userId && householdId ? await getOrCreateConversation({ householdId, channel: "WEB", userId }) : null;
   const history = conversation ? await getRecentMessages(conversation.id) : [];
 
   return (

@@ -20,16 +20,17 @@ function money(n: number) {
 
 export default async function InsightsPage() {
   const session = await getServerSession(authOptions);
+  const householdId = (session?.user as any)?.householdId as string;
 
   const [daily, weekly, monthly, quarterly, annual, anomalies, cashFlow, reallocations] = await Promise.all([
-    getDailySeries(30),
-    getWeeklyComparison(),
-    getMonthlyProjection(),
-    getQuarterlyStats(),
-    getAnnualStats(),
-    detectAnomalies(),
-    getCashFlowProjection(),
-    suggestReallocations(),
+    getDailySeries(householdId, 30),
+    getWeeklyComparison(householdId),
+    getMonthlyProjection(householdId),
+    getQuarterlyStats(householdId),
+    getAnnualStats(householdId),
+    detectAnomalies(householdId),
+    getCashFlowProjection(householdId),
+    suggestReallocations(householdId),
   ]);
 
   const atRiskAccounts = cashFlow.filter((c) => c.atRisk);

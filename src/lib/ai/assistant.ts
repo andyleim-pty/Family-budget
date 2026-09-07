@@ -110,33 +110,38 @@ const tools: Anthropic.Tool[] = [
   },
 ];
 
-async function executeTool(name: string, input: any, userId: string | null): Promise<unknown> {
+async function executeTool(
+  name: string,
+  input: any,
+  userId: string | null,
+  householdId: string
+): Promise<unknown> {
   switch (name) {
     case "get_budget_snapshot":
-      return getHouseholdSummary();
+      return getHouseholdSummary(householdId);
 
     case "get_spending_stats": {
       switch (input.period) {
         case "daily":
-          return getDailySummary();
+          return getDailySummary(householdId);
         case "weekly":
-          return getWeeklyComparison();
+          return getWeeklyComparison(householdId);
         case "monthly":
-          return getMonthlyProjection();
+          return getMonthlyProjection(householdId);
         case "quarterly":
-          return getQuarterlyStats();
+          return getQuarterlyStats(householdId);
         case "annual":
-          return getAnnualStats();
+          return getAnnualStats(householdId);
         default:
           return { error: "unknown period" };
       }
     }
 
     case "assess_expense_impact":
-      return assessExpenseImpact(String(input.bucket_name), Number(input.amount));
+      return assessExpenseImpact(householdId, String(input.bucket_name), Number(input.amount));
 
     case "get_recent_transactions": {
-      const where: any = {};
+      const where: any = { householdId };
       if (input.bucket_name) where.bucket = { name: { equals: input.bucket_name } };
       if (input.merchant_contains) where.merchant = { contains: input.merchant_contains };
       const txns = await prisma.transaction.findMany({
@@ -155,12 +160,13 @@ async function executeTool(name: string, input: any, userId: string | null): Pro
 
     case "log_transaction": {
       const bucket = await prisma.bucket.findFirst({
-        where: { name: { equals: String(input.bucket_name) }, archived: false },
+        where: { householdId, name: { equals: String(input.bucket_name) }, archived: false },
       });
       if (!bucket) return { error: `No bucket named "${input.bucket_name}"` };
       const amount = Number(input.amount);
       const transaction = await prisma.transaction.create({
         data: {
+          householdId,
           amount,
           merchant: input.merchant ?? null,
           note: input.note ?? null,
@@ -171,7 +177,7 @@ async function executeTool(name: string, input: any, userId: string | null): Pro
           userId,
         },
       });
-      const statuses = await getBucketStatuses();
+      const statuses = await getBucketStatuses(householdId);
       const status = statuses.find((s) => s.bucketId === bucket.id);
       return {
         logged: true,
@@ -189,7 +195,8 @@ async function executeTool(name: string, input: any, userId: string | null): Pro
 export async function runAssistantTurn(
   history: { role: ChatRole; content: string }[],
   userMessage: string,
-  userId: string | null
+  userId: string | null,
+  householdId: string
 ): Promise<string> {
   const messages: Anthropic.MessageParam[] = [
     ...history.map((m) => ({ role: m.role, content: m.content })),
@@ -220,7 +227,7 @@ export async function runAssistantTurn(
       if (block.type !== "tool_use") continue;
       let result: unknown;
       try {
-        result = await executeTool(block.name, block.input, userId);
+        result = await executeTool(block.name, block.input, userId, householdId);
       } catch (err: any) {
         result = { error: String(err?.message ?? err) };
       }
