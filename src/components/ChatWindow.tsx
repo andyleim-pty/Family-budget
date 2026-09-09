@@ -40,7 +40,8 @@ export default function ChatWindow({ initialMessages }: { initialMessages: Messa
       <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
         {messages.length === 0 && (
           <div className="text-sm text-gray-400 text-center mt-8">
-            Try: "should I buy a $5 coffee?" or "how's Dining looking this month?"
+            Try: "should I buy a $5 coffee?", "how's Dining looking this month?", or paste in some
+            statement text to import.
           </div>
         )}
         {messages.map((m, i) => (

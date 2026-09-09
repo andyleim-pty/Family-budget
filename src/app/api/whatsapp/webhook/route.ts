@@ -48,6 +48,7 @@ function parseMessage(message: any): null | {
   fromPhone: string;
   kind: MessageKind;
   mediaId?: string;
+  filename?: string;
   text?: string;
 } {
   const fromPhone = message.from?.startsWith("+") ? message.from : `+${message.from}`;
@@ -59,6 +60,17 @@ function parseMessage(message: any): null | {
   }
   if (message.type === "audio" || message.type === "voice") {
     return { waMessageId, fromPhone, kind: "AUDIO", mediaId: message.audio?.id ?? message.voice?.id };
+  }
+  if (message.type === "document") {
+    // A whole bank statement — CSV, PDF, or a scanned image sent as a file
+    // rather than a photo. See src/lib/whatsapp/ingest.ts's DOCUMENT handling.
+    return {
+      waMessageId,
+      fromPhone,
+      kind: "DOCUMENT",
+      mediaId: message.document?.id,
+      filename: message.document?.filename,
+    };
   }
   if (message.type === "text") {
     return { waMessageId, fromPhone, kind: "TEXT", text: message.text?.body };

@@ -20,7 +20,9 @@ export default async function AssistantPage() {
           <h1 className="text-2xl font-bold">Budget assistant</h1>
           <p className="text-sm text-gray-500">
             Ask before you spend — "should I get a $5 coffee?" — or ask how the month's going.
-            Real numbers from your buckets and pockets, not guesses.
+            Real numbers from your buckets and pockets, not guesses. You can also paste a chunk of
+            bank statement text straight in — it'll extract, categorize, and ask which account
+            before filing anything.
           </p>
         </div>
         <ChatWindow initialMessages={history} />

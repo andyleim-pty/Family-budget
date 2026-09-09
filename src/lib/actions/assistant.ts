@@ -11,7 +11,7 @@ export async function sendAssistantMessage(userMessage: string): Promise<string>
   const conversation = await getOrCreateConversation({ householdId, channel: "WEB", userId });
   const history = await getRecentMessages(conversation.id);
 
-  const reply = await runAssistantTurn(history, userMessage, userId, householdId);
+  const reply = await runAssistantTurn(history, userMessage, userId, householdId, conversation.id);
 
   await appendMessage(conversation.id, "user", userMessage);
   await appendMessage(conversation.id, "assistant", reply);

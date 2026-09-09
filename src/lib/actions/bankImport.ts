@@ -1,9 +1,8 @@
 "use server";
 
-import { prisma } from "@/lib/prisma";
 import { requireSessionUser } from "@/lib/household";
-import { parseStatementCsv, statementRowExternalId } from "@/lib/bank-feed/csv-import";
-import { categorizeText } from "@/lib/ai/categorize";
+import { parseStatementCsv } from "@/lib/bank-feed/csv-import";
+import { categorizeRows, insertCategorizedRows } from "@/lib/bank-feed/import-rows";
 import { revalidatePath } from "next/cache";
 
 export type ImportSummary = {
@@ -33,56 +32,15 @@ export async function importStatementCsv(formData: FormData): Promise<ImportSumm
   const file = formData.get("file") as File | null;
   if (!accountId || !file) throw new Error("Account and file are required");
 
-  const account = await prisma.account.findFirst({ where: { id: accountId, householdId } });
-  if (!account) throw new Error("Account not found");
   const text = await file.text();
   const { rows, unreadable, nonExpense } = parseStatementCsv(text);
-
-  let imported = 0;
-  let duplicates = 0;
-  let uncategorized = 0;
-
-  for (const row of rows) {
-    const externalId = statementRowExternalId(accountId, row);
-    const existing = await prisma.transaction.findFirst({ where: { accountId, externalId } });
-    if (existing) {
-      duplicates++;
-      continue;
-    }
-
-    let bucketId: string | null = null;
-    let confidence: number | null = null;
-    let isMicro = false;
-    try {
-      const result = await categorizeText(householdId, `${row.description} $${row.amount.toFixed(2)}`);
-      bucketId = result.bucketId;
-      confidence = result.confidence;
-      isMicro = result.isMicro;
-    } catch {
-      // No ANTHROPIC_API_KEY, or categorization failed — still import the
-      // transaction, just uncategorized (fixable from the Transactions
-      // page's "Move" control).
-    }
-    if (!bucketId) uncategorized++;
-
-    await prisma.transaction.create({
-      data: {
-        householdId,
-        amount: row.amount,
-        currency: account.currency,
-        merchant: row.description,
-        occurredAt: row.occurredAt,
-        source: "IMPORT",
-        isMicro,
-        aiConfidence: confidence,
-        bucketId,
-        accountId,
-        externalId,
-        userId,
-      },
-    });
-    imported++;
-  }
+  const categorized = await categorizeRows(householdId, rows);
+  const { imported, duplicates, uncategorized } = await insertCategorizedRows(
+    householdId,
+    accountId,
+    categorized,
+    userId
+  );
 
   revalidatePath("/transactions");
   revalidatePath("/");

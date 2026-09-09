@@ -8,6 +8,8 @@ import {
   getQuarterlyStats,
   getAnnualStats,
 } from "@/lib/analytics";
+import { extractStatementFromText } from "@/lib/ai/statement";
+import { categorizeRows, insertCategorizedRows, summarizeByBucket, type CategorizedRow } from "@/lib/bank-feed/import-rows";
 import type { ChatRole } from "@/lib/enums";
 
 let _client: Anthropic | null = null;
@@ -45,6 +47,13 @@ How to help:
   (daily/weekly/monthly/quarterly/annual) and summarize the real numbers concisely.
 - Only call log_transaction after the person clearly confirms they want it recorded (e.g. "yes",
   "log it", "go ahead") — never log something on your own initiative just because it was discussed.
+- If the person pastes (or a document/photo they sent contains) several lines that look like a
+  bank statement or a list of transactions — dates, amounts, merchant names — call
+  preview_statement with that text verbatim (don't summarize or retype it). Report back the count,
+  total, and a short breakdown by bucket, then ask which account to file them under (list the
+  account names from get_budget_snapshot). Once they name one, call commit_statement. If a
+  document was already extracted for them (a message saying so will appear in the conversation),
+  skip straight to asking which account.
 - Keep replies short — a few sentences. This is read in a chat bubble or a WhatsApp message, not a
   report.`;
 
@@ -108,13 +117,37 @@ const tools: Anthropic.Tool[] = [
       required: ["bucket_name", "amount"],
     },
   },
+  {
+    name: "preview_statement",
+    description:
+      "Extracts and categorizes expense transactions from pasted statement text (or text describing an already-extracted document). Does not save anything yet — holds the result until commit_statement is called.",
+    input_schema: {
+      type: "object",
+      properties: {
+        raw_text: { type: "string", description: "The statement text, verbatim." },
+      },
+      required: ["raw_text"],
+    },
+  },
+  {
+    name: "commit_statement",
+    description: "Saves the transactions from the most recent preview_statement call against the named account.",
+    input_schema: {
+      type: "object",
+      properties: {
+        account_name: { type: "string", description: "Exact account name from get_budget_snapshot." },
+      },
+      required: ["account_name"],
+    },
+  },
 ];
 
 async function executeTool(
   name: string,
   input: any,
   userId: string | null,
-  householdId: string
+  householdId: string,
+  conversationId: string
 ): Promise<unknown> {
   switch (name) {
     case "get_budget_snapshot":
@@ -186,6 +219,45 @@ async function executeTool(
       };
     }
 
+    case "preview_statement": {
+      const rawText = String(input.raw_text ?? "");
+      if (!rawText.trim()) return { error: "No text to extract from" };
+      const { rows, note } = await extractStatementFromText(rawText);
+      if (rows.length === 0) {
+        return { found: 0, note: note || "Couldn't find any expense rows in that text." };
+      }
+      const categorized = await categorizeRows(householdId, rows);
+      await prisma.conversation.update({
+        where: { id: conversationId },
+        data: { pendingImportJson: JSON.stringify(categorized) },
+      });
+      const total = categorized.reduce((s, r) => s + r.amount, 0);
+      return {
+        found: categorized.length,
+        total: Math.round(total * 100) / 100,
+        byBucket: summarizeByBucket(categorized),
+        note,
+      };
+    }
+
+    case "commit_statement": {
+      const conversation = await prisma.conversation.findUniqueOrThrow({ where: { id: conversationId } });
+      if (!conversation.pendingImportJson) {
+        return { error: "Nothing pending — call preview_statement first" };
+      }
+      const account = await prisma.account.findFirst({
+        where: { householdId, name: { equals: String(input.account_name) }, archived: false },
+      });
+      if (!account) return { error: `No account named "${input.account_name}"` };
+
+      const rows: CategorizedRow[] = JSON.parse(conversation.pendingImportJson, (key, value) =>
+        key === "occurredAt" ? new Date(value) : value
+      );
+      const summary = await insertCategorizedRows(householdId, account.id, rows, userId);
+      await prisma.conversation.update({ where: { id: conversationId }, data: { pendingImportJson: null } });
+      return { committed: true, ...summary };
+    }
+
     default:
       return { error: `Unknown tool ${name}` };
   }
@@ -196,7 +268,8 @@ export async function runAssistantTurn(
   history: { role: ChatRole; content: string }[],
   userMessage: string,
   userId: string | null,
-  householdId: string
+  householdId: string,
+  conversationId: string
 ): Promise<string> {
   const messages: Anthropic.MessageParam[] = [
     ...history.map((m) => ({ role: m.role, content: m.content })),
@@ -227,7 +300,7 @@ export async function runAssistantTurn(
       if (block.type !== "tool_use") continue;
       let result: unknown;
       try {
-        result = await executeTool(block.name, block.input, userId, householdId);
+        result = await executeTool(block.name, block.input, userId, householdId, conversationId);
       } catch (err: any) {
         result = { error: String(err?.message ?? err) };
       }

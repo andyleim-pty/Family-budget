@@ -35,7 +35,7 @@ export const TRANSACTION_SOURCES = [
 ] as const;
 export type TransactionSource = (typeof TRANSACTION_SOURCES)[number];
 
-export const MESSAGE_KINDS = ["IMAGE", "AUDIO", "TEXT"] as const;
+export const MESSAGE_KINDS = ["IMAGE", "AUDIO", "TEXT", "DOCUMENT"] as const;
 export type MessageKind = (typeof MESSAGE_KINDS)[number];
 
 export const MESSAGE_STATUSES = [

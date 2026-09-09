@@ -28,6 +28,11 @@ budget-status reply.
      budget and a one-line suggestion ("Dining is at 92% used with 12 days left in the month…").
   5. If unsure, replies asking which bucket it belongs to (reply with a number); a later
      `"fix <bucket name>"` reply re-files an already-logged transaction.
+- **WhatsApp statement upload** — send a whole bank statement as a file (CSV, or a PDF export —
+  even a photo of a paper one) and it extracts every expense line, categorizes each one, and asks
+  which account to file them under before writing anything. CSVs parse deterministically; PDFs and
+  photos go through Claude's document/vision extraction. Same de-dupe as the web CSV importer, so
+  an overlapping re-send doesn't create duplicates.
 - Everything the AI does is also available as a plain web UI (manual transaction entry,
   bucket/pocket/account management) so this never depends on WhatsApp working.
 - **Insights** — daily (30-day trend), weekly (this week vs. last), monthly (pace-based
@@ -46,7 +51,11 @@ budget-status reply.
   gently offer a reframe (save toward something bigger, contribute to tzedakah/charity, invest it
   instead) as one option among others — never as a lecture. On WhatsApp, a question ("should I get
   a coffee?") is routed here automatically instead of being logged as an expense; a statement
-  ("$5 coffee") is still logged as before.
+  ("$5 coffee") is still logged as before. You can also paste raw statement text (copied out of a
+  banking app, say) straight into either chat — it extracts and categorizes the transactions, tells
+  you the count/total/breakdown, and asks which account to file them under before committing
+  anything. A statement file sent over WhatsApp is handed to the assistant the same way, so the
+  "which account" conversation feels identical whether it came from a paste or an attachment.
 
 ## Stack
 
@@ -185,13 +194,15 @@ src/lib/digest.ts            Builds the WhatsApp digest text from src/lib/analyt
 src/lib/enums.ts             String-enum values (SQLite doesn't support native Prisma enums)
 src/lib/ai/categorize.ts     Claude-based extraction + bucket matching (photo or text) + expense-vs-question intent classification
 src/lib/ai/transcribe.ts     Whisper voice-note transcription
-src/lib/ai/assistant.ts      The chat assistant's tool-use loop (shared by the web chat and WhatsApp)
+src/lib/ai/assistant.ts      The chat assistant's tool-use loop (shared by the web chat and WhatsApp), incl. preview_statement/commit_statement
+src/lib/ai/statement.ts      Extracts expense rows from pasted text or an uploaded document (PDF/photo) via Claude
 src/lib/conversations.ts     Conversation/ChatMessage persistence (per WhatsApp number or per web user)
 src/lib/whatsapp/client.ts   WhatsApp Cloud API send + media download
 src/lib/whatsapp/ingest.ts   The end-to-end pipeline: message → AI → transaction or assistant reply
 src/lib/actions/*.ts         Server actions backing the web UI's forms and the assistant chat page
 src/lib/bank-feed/csv-import.ts  CSV statement parsing + de-dupe hash (any bank, any country)
-src/lib/actions/bankImport.ts   Server action: parse → categorize → insert as Transaction
+src/lib/bank-feed/import-rows.ts  Shared categorize/insert pipeline behind all three import paths (web CSV, WhatsApp document, chat paste)
+src/lib/actions/bankImport.ts   Web CSV import server action (parses, then calls import-rows.ts)
 src/lib/bank-feed/README.md  What's implemented today + exactly how a live feed (Plaid, etc.) would plug in later
 src/app/*                    Pages: dashboard, insights, assistant, buckets, pockets, accounts, transactions, settings
 src/app/api/whatsapp/webhook Inbound WhatsApp webhook (GET verify, POST messages)
@@ -200,12 +211,22 @@ src/app/api/cron/*           Bearer-token-guarded routes that trigger the daily/
 
 ## Bank statement import
 
-The Transactions page has a **CSV import** card: export a statement from your bank's website and
-drop it in against one of your accounts. It recognizes common column-name variants (`Date`,
-`Description`/`Memo`/`Payee`, `Amount` or separate `Debit`/`Credit`) rather than needing one exact
-format, categorizes each row with the same AI matcher the WhatsApp pipeline uses, and skips rows
-you've already imported if a date range overlaps a previous upload. This works for any bank in any
-country — it's the practical option when a live feed isn't available (see below).
+Three ways to bulk-import a statement, all sharing the same categorize/de-dupe pipeline
+(`src/lib/bank-feed/import-rows.ts`):
+
+1. **Web CSV upload** — the Transactions page has a CSV import card: pick an account, drop in a
+   file exported from your bank's website. Recognizes common column-name variants (`Date`,
+   `Description`/`Memo`/`Payee`, `Amount` or separate `Debit`/`Credit`) rather than needing one
+   exact format.
+2. **WhatsApp file upload** — send a statement as a file. CSV parses the same deterministic way as
+   the web upload; a PDF or a photo of a paper statement goes through Claude's document/vision
+   extraction instead (`src/lib/ai/statement.ts`). Either way you're then asked which account to
+   file it under before anything is written.
+3. **Paste into either chat** — copy some statement text out of a banking app and paste it into
+   the web Assistant or a WhatsApp message; same extraction, same "which account" confirmation.
+
+All three skip rows already imported if a range overlaps a previous upload, and work for any bank
+in any country — the practical option when a live feed isn't available (see below).
 
 ## Notes on what's intentionally out of scope (v1)
 

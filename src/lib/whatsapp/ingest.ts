@@ -1,6 +1,9 @@
 import { prisma } from "@/lib/prisma";
 import { categorizeImage, categorizeText, classifyIntent, type CategorizationResult } from "@/lib/ai/categorize";
 import { transcribeAudio } from "@/lib/ai/transcribe";
+import { extractStatementFromDocument } from "@/lib/ai/statement";
+import { parseStatementCsv } from "@/lib/bank-feed/csv-import";
+import { categorizeRows, summarizeByBucket } from "@/lib/bank-feed/import-rows";
 import { downloadWhatsAppMedia, sendWhatsAppText } from "@/lib/whatsapp/client";
 import { getBucketStatuses, suggestionFor } from "@/lib/budget";
 import { runAssistantTurn } from "@/lib/ai/assistant";
@@ -12,6 +15,7 @@ type InboundWhatsAppMessage = {
   fromPhone: string;
   kind: MessageKind;
   mediaId?: string;
+  filename?: string;
   text?: string;
 };
 
@@ -45,6 +49,12 @@ export async function handleInboundWhatsAppMessage(msg: InboundWhatsAppMessage) 
   }
   const householdId = user.householdId;
 
+  if (msg.kind === "DOCUMENT") {
+    if (!msg.mediaId) return;
+    await handleStatementDocument(msg.waMessageId, msg.fromPhone, user.id, householdId, msg.mediaId, msg.filename);
+    return;
+  }
+
   // A short numeric/bucket-name reply to a still-fresh pending message is
   // treated as a correction rather than a brand-new expense.
   if (msg.kind === "TEXT" && msg.text) {
@@ -52,6 +62,14 @@ export async function handleInboundWhatsAppMessage(msg: InboundWhatsAppMessage) 
     if (pending) {
       const resolved = await tryResolvePendingReply(householdId, pending, msg.text.trim());
       if (resolved) return;
+    }
+
+    // Mid-way through importing a statement, everything the person says is
+    // for the assistant (choosing an account, answering a follow-up) — skip
+    // the expense-vs-question classifier entirely.
+    if (await hasPendingImport(householdId, msg.fromPhone)) {
+      await handleAssistantQuestion(msg.waMessageId, msg.fromPhone, user.id, householdId, msg.text);
+      return;
     }
 
     // Not every text message is reporting an expense — "should I get a
@@ -128,10 +146,90 @@ async function handleAssistantQuestion(
   try {
     const conversation = await getOrCreateConversation({ householdId, channel: "WHATSAPP", userId, phone: fromPhone });
     const history = await getRecentMessages(conversation.id);
-    const reply = await runAssistantTurn(history, text, userId, householdId);
+    const reply = await runAssistantTurn(history, text, userId, householdId, conversation.id);
 
     await appendMessage(conversation.id, "user", text);
     await appendMessage(conversation.id, "assistant", reply);
+    await prisma.inboundMessage.update({ where: { id: record.id }, data: { status: "ANSWERED" } });
+    await safeReply(fromPhone, reply);
+  } catch (err: any) {
+    await prisma.inboundMessage.update({
+      where: { id: record.id },
+      data: { status: "FAILED", errorMessage: String(err?.message ?? err) },
+    });
+    await safeReply(fromPhone, friendlyErrorMessage(err));
+  }
+}
+
+async function hasPendingImport(householdId: string, fromPhone: string): Promise<boolean> {
+  const conversation = await prisma.conversation.findFirst({
+    where: { householdId, channel: "WHATSAPP", phone: fromPhone, pendingImportJson: { not: null } },
+  });
+  return !!conversation;
+}
+
+/**
+ * A whole statement sent as a file — CSV parses deterministically; anything
+ * else (PDF, or a photo of a paper statement sent as a "document") goes
+ * through Claude's document/vision extraction. Either way, the extracted
+ * rows are categorized and handed to the assistant, which asks which
+ * account to file them under and commits once the person answers — the
+ * same preview/commit flow a pasted-text statement in chat uses.
+ */
+async function handleStatementDocument(
+  waMessageId: string,
+  fromPhone: string,
+  userId: string,
+  householdId: string,
+  mediaId: string,
+  filename?: string
+) {
+  const record = await prisma.inboundMessage.create({
+    data: { householdId, waMessageId, fromPhone, userId, kind: "DOCUMENT", mediaId, status: "PROCESSING" },
+  });
+
+  try {
+    const { base64, mimeType } = await downloadWhatsAppMedia(mediaId);
+    const isCsv = mimeType.includes("csv") || (filename ?? "").toLowerCase().endsWith(".csv");
+
+    const { rows, note } = isCsv
+      ? { ...parseStatementCsv(Buffer.from(base64, "base64").toString("utf8")), note: "" }
+      : await extractStatementFromDocument(base64, mimeType);
+
+    if (rows.length === 0) {
+      await prisma.inboundMessage.update({
+        where: { id: record.id },
+        data: { status: "FAILED", errorMessage: "No transactions found" },
+      });
+      await safeReply(
+        fromPhone,
+        `I couldn't find any transactions in that file.${note ? ` (${note})` : ""} A CSV or PDF export usually works best.`
+      );
+      return;
+    }
+
+    const categorized = await categorizeRows(householdId, rows);
+    const conversation = await getOrCreateConversation({ householdId, channel: "WHATSAPP", userId, phone: fromPhone });
+    await prisma.conversation.update({
+      where: { id: conversation.id },
+      data: { pendingImportJson: JSON.stringify(categorized) },
+    });
+
+    const total = categorized.reduce((s, r) => s + r.amount, 0);
+    const breakdown = summarizeByBucket(categorized)
+      .slice(0, 4)
+      .map((b) => `${b.name}: $${Math.round(b.total)}`)
+      .join(", ");
+    const userSummary = `Sent a statement: ${categorized.length} transactions totaling $${Math.round(total)}.`;
+    const kickoff = `[Statement attachment processed — ${categorized.length} transactions totaling $${Math.round(
+      total
+    )} (${breakdown}).${note ? ` Note: ${note}.` : ""} Ask which account to file these under; call commit_statement once they answer — don't call preview_statement again, it's already done.]`;
+
+    const history = await getRecentMessages(conversation.id);
+    const reply = await runAssistantTurn(history, kickoff, userId, householdId, conversation.id);
+    await appendMessage(conversation.id, "user", userSummary);
+    await appendMessage(conversation.id, "assistant", reply);
+
     await prisma.inboundMessage.update({ where: { id: record.id }, data: { status: "ANSWERED" } });
     await safeReply(fromPhone, reply);
   } catch (err: any) {

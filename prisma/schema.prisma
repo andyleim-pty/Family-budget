@@ -217,6 +217,11 @@ model Conversation {
   userId    String?
   // Set for WHATSAPP conversations before/without a linked User.
   phone     String?
+  // Extracted-but-not-yet-committed rows from a pasted statement or an
+  // uploaded document (serialized CategorizedRow[] + a note — see
+  // src/lib/bank-feed/import-rows.ts), while the assistant is waiting to
+  // hear which account to file them under. Cleared once committed.
+  pendingImportJson String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
