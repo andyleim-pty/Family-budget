@@ -48,9 +48,9 @@ function extractionTool(bucketList: string) {
   };
 }
 
-async function activeBuckets() {
+async function activeBuckets(householdId: string) {
   return prisma.bucket.findMany({
-    where: { archived: false },
+    where: { householdId, archived: false },
     select: { id: true, name: true, description: true, kind: true, microThreshold: true },
   });
 }
@@ -61,8 +61,12 @@ function bucketListDescription(buckets: Awaited<ReturnType<typeof activeBuckets>
     .join(", ");
 }
 
-async function runTool(systemPrompt: string, userContent: Anthropic.MessageParam["content"]) {
-  const buckets = await activeBuckets();
+async function runTool(
+  householdId: string,
+  systemPrompt: string,
+  userContent: Anthropic.MessageParam["content"]
+) {
+  const buckets = await activeBuckets(householdId);
   const bucketList = bucketListDescription(buckets);
 
   const message = await client().messages.create({
@@ -106,8 +110,12 @@ message isn't actually about an expense, set bucket_name to null and explain bri
 parking, small taps) when a dedicated one exists. Be decisive — this runs unattended.`;
 
 /** Categorize a receipt photo (base64-encoded image). */
-export async function categorizeImage(base64: string, mediaType: string): Promise<CategorizationResult> {
-  return runTool(SYSTEM_PROMPT, [
+export async function categorizeImage(
+  householdId: string,
+  base64: string,
+  mediaType: string
+): Promise<CategorizationResult> {
+  return runTool(householdId, SYSTEM_PROMPT, [
     {
       type: "image",
       source: { type: "base64", media_type: mediaType as any, data: base64 },
@@ -120,11 +128,48 @@ export async function categorizeImage(base64: string, mediaType: string): Promis
 }
 
 /** Categorize a plain-text description (typed message, or a voice-note transcript). */
-export async function categorizeText(text: string): Promise<CategorizationResult> {
-  return runTool(SYSTEM_PROMPT, [
+export async function categorizeText(householdId: string, text: string): Promise<CategorizationResult> {
+  return runTool(householdId, SYSTEM_PROMPT, [
     {
       type: "text",
       text: `WhatsApp message describing an expense: "${text}"`,
     },
   ]);
+}
+
+const INTENT_TOOL_NAME = "classify_message";
+
+/**
+ * Decides whether an inbound WhatsApp text is reporting a past/current
+ * expense (route to categorizeText) or asking a question / seeking advice
+ * (route to the chat assistant) — e.g. "$5 coffee" vs. "should I get a coffee?".
+ */
+export async function classifyIntent(text: string): Promise<"expense" | "question"> {
+  const message = await client().messages.create({
+    model: process.env.ANTHROPIC_MODEL || "claude-sonnet-5",
+    max_tokens: 128,
+    tools: [
+      {
+        name: INTENT_TOOL_NAME,
+        description: "Classify an inbound WhatsApp message.",
+        input_schema: {
+          type: "object",
+          properties: {
+            intent: {
+              type: "string",
+              enum: ["expense", "question"],
+              description:
+                '"expense" if reporting a purchase that already happened or is happening now (has or implies an amount). "question" for anything else — asking for advice, asking about budget status, small talk, or a hypothetical purchase not yet made.',
+            },
+          },
+          required: ["intent"],
+        },
+      },
+    ],
+    tool_choice: { type: "tool", name: INTENT_TOOL_NAME },
+    messages: [{ role: "user", content: text }],
+  });
+  const toolUse = message.content.find((c): c is Anthropic.ToolUseBlock => c.type === "tool_use");
+  const intent = (toolUse?.input as any)?.intent;
+  return intent === "question" ? "question" : "expense";
 }

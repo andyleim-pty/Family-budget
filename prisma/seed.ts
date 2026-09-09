@@ -4,7 +4,16 @@ import bcrypt from "bcryptjs";
 const prisma = new PrismaClient();
 
 async function main() {
-  const owner = await upsertUser({
+  // There's no self-serve signup yet, so the household itself is seeded
+  // too — find-or-create by name rather than assuming a fresh database.
+  const householdName = process.env.HOUSEHOLD_NAME || "Our household";
+  let household = await prisma.household.findFirst({ where: { name: householdName } });
+  if (!household) {
+    household = await prisma.household.create({ data: { name: householdName } });
+  }
+  const householdId = household.id;
+
+  const owner = await upsertUser(householdId, {
     name: process.env.OWNER_NAME || "Andy",
     email: process.env.OWNER_EMAIL || "andy@example.com",
     password: process.env.OWNER_PASSWORD || "change-me-immediately",
@@ -12,7 +21,7 @@ async function main() {
     whatsappPhone: process.env.OWNER_WHATSAPP_PHONE || null,
   });
 
-  await upsertUser({
+  await upsertUser(householdId, {
     name: process.env.PARTNER_NAME || "Partner",
     email: process.env.PARTNER_EMAIL || "partner@example.com",
     password: process.env.PARTNER_PASSWORD || "change-me-immediately",
@@ -20,18 +29,19 @@ async function main() {
     whatsappPhone: process.env.PARTNER_WHATSAPP_PHONE || null,
   });
 
-  const existingAccounts = await prisma.account.count();
+  const existingAccounts = await prisma.account.count({ where: { householdId } });
   if (existingAccounts === 0) {
     const everyday = await prisma.account.create({
-      data: { name: "Joint everyday", type: "CHECKING", balance: 0 },
+      data: { householdId, name: "Joint everyday", type: "CHECKING", balance: 0 },
     });
     const savings = await prisma.account.create({
-      data: { name: "Joint savings", type: "SAVINGS", balance: 0 },
+      data: { householdId, name: "Joint savings", type: "SAVINGS", balance: 0 },
     });
 
     await prisma.bucket.createMany({
       data: [
         {
+          householdId,
           name: "Groceries",
           kind: "ESSENTIAL",
           monthlyLimit: 1200,
@@ -41,6 +51,7 @@ async function main() {
           description: "Supermarket and fresh food shops.",
         },
         {
+          householdId,
           name: "Utilities & bills",
           kind: "ESSENTIAL",
           monthlyLimit: 500,
@@ -50,6 +61,7 @@ async function main() {
           description: "Electricity, gas, water, internet, phone plans.",
         },
         {
+          householdId,
           name: "Dining & takeaway",
           kind: "DISCRETIONARY",
           monthlyLimit: 300,
@@ -59,6 +71,7 @@ async function main() {
           description: "Restaurants, cafes, food delivery.",
         },
         {
+          householdId,
           name: "Micro-expenses",
           kind: "MICRO",
           monthlyLimit: 150,
@@ -69,6 +82,7 @@ async function main() {
             "Coffees, snacks, parking, small everyday taps — the death-by-a-thousand-cuts bucket.",
         },
         {
+          householdId,
           name: "Kids & family",
           kind: "ESSENTIAL",
           monthlyLimit: 400,
@@ -83,6 +97,7 @@ async function main() {
     await prisma.pocket.createMany({
       data: [
         {
+          householdId,
           name: "Emergency fund",
           goalType: "EMERGENCY",
           targetAmount: 6000,
@@ -90,6 +105,7 @@ async function main() {
           accountId: savings.id,
         },
         {
+          householdId,
           name: "Christmas & festivities",
           goalType: "FESTIVITY",
           targetAmount: 1500,
@@ -97,6 +113,7 @@ async function main() {
           accountId: savings.id,
         },
         {
+          householdId,
           name: "Annual holiday",
           goalType: "HOLIDAY",
           targetAmount: 4000,
@@ -109,21 +126,25 @@ async function main() {
     console.log("Seeded demo accounts, buckets, and savings pockets.");
   }
 
-  console.log(`Seed complete. Owner login: ${owner.email}`);
+  console.log(`Seed complete. Household: "${household.name}". Owner login: ${owner.email}`);
 }
 
-async function upsertUser(opts: {
-  name: string;
-  email: string;
-  password: string;
-  role: "OWNER" | "PARTNER";
-  whatsappPhone: string | null;
-}) {
+async function upsertUser(
+  householdId: string,
+  opts: {
+    name: string;
+    email: string;
+    password: string;
+    role: "OWNER" | "PARTNER";
+    whatsappPhone: string | null;
+  }
+) {
   const passwordHash = await bcrypt.hash(opts.password, 10);
   return prisma.user.upsert({
     where: { email: opts.email.toLowerCase() },
     update: {},
     create: {
+      householdId,
       name: opts.name,
       email: opts.email.toLowerCase(),
       passwordHash,

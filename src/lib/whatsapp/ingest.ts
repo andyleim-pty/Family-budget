@@ -1,8 +1,13 @@
 import { prisma } from "@/lib/prisma";
-import { categorizeImage, categorizeText, type CategorizationResult } from "@/lib/ai/categorize";
+import { categorizeImage, categorizeText, classifyIntent, type CategorizationResult } from "@/lib/ai/categorize";
 import { transcribeAudio } from "@/lib/ai/transcribe";
+import { extractStatementFromDocument } from "@/lib/ai/statement";
+import { parseStatementCsv } from "@/lib/bank-feed/csv-import";
+import { categorizeRows, summarizeByBucket } from "@/lib/bank-feed/import-rows";
 import { downloadWhatsAppMedia, sendWhatsAppText } from "@/lib/whatsapp/client";
 import { getBucketStatuses, suggestionFor } from "@/lib/budget";
+import { runAssistantTurn } from "@/lib/ai/assistant";
+import { getOrCreateConversation, getRecentMessages, appendMessage } from "@/lib/conversations";
 import type { MessageKind } from "@/lib/enums";
 
 type InboundWhatsAppMessage = {
@@ -10,6 +15,7 @@ type InboundWhatsAppMessage = {
   fromPhone: string;
   kind: MessageKind;
   mediaId?: string;
+  filename?: string;
   text?: string;
 };
 
@@ -22,21 +28,71 @@ export async function handleInboundWhatsAppMessage(msg: InboundWhatsAppMessage) 
 
   const user = await prisma.user.findUnique({ where: { whatsappPhone: msg.fromPhone } });
 
+  if (!user) {
+    // An unrecognized number can't be attributed to a household — there's
+    // nothing safe to categorize or bill against.
+    await prisma.inboundMessage.create({
+      data: {
+        waMessageId: msg.waMessageId,
+        fromPhone: msg.fromPhone,
+        kind: msg.kind,
+        mediaId: msg.mediaId,
+        status: "FAILED",
+        errorMessage: "Phone number not linked to any household",
+      },
+    });
+    await safeReply(
+      msg.fromPhone,
+      "This number isn't linked to a household yet. Ask whoever set up your account to add it under Settings."
+    );
+    return;
+  }
+  const householdId = user.householdId;
+
+  if (msg.kind === "DOCUMENT") {
+    if (!msg.mediaId) return;
+    await handleStatementDocument(msg.waMessageId, msg.fromPhone, user.id, householdId, msg.mediaId, msg.filename);
+    return;
+  }
+
   // A short numeric/bucket-name reply to a still-fresh pending message is
   // treated as a correction rather than a brand-new expense.
   if (msg.kind === "TEXT" && msg.text) {
     const pending = await findRecentPending(msg.fromPhone);
     if (pending) {
-      const resolved = await tryResolvePendingReply(pending, msg.text.trim());
+      const resolved = await tryResolvePendingReply(householdId, pending, msg.text.trim());
       if (resolved) return;
+    }
+
+    // Mid-way through importing a statement, everything the person says is
+    // for the assistant (choosing an account, answering a follow-up) — skip
+    // the expense-vs-question classifier entirely.
+    if (await hasPendingImport(householdId, msg.fromPhone)) {
+      await handleAssistantQuestion(msg.waMessageId, msg.fromPhone, user.id, householdId, msg.text);
+      return;
+    }
+
+    // Not every text message is reporting an expense — "should I get a
+    // coffee?" needs the advisor chat, not the expense extractor.
+    try {
+      const intent = await classifyIntent(msg.text);
+      if (intent === "question") {
+        await handleAssistantQuestion(msg.waMessageId, msg.fromPhone, user.id, householdId, msg.text);
+        return;
+      }
+    } catch (err) {
+      // If intent classification itself fails (e.g. no API key), fall
+      // through to the normal expense flow, which has its own error handling.
+      console.error("Intent classification failed:", err);
     }
   }
 
   const record = await prisma.inboundMessage.create({
     data: {
+      householdId,
       waMessageId: msg.waMessageId,
       fromPhone: msg.fromPhone,
-      userId: user?.id,
+      userId: user.id,
       kind: msg.kind,
       mediaId: msg.mediaId,
       status: "PROCESSING",
@@ -49,19 +105,19 @@ export async function handleInboundWhatsAppMessage(msg: InboundWhatsAppMessage) 
     if (msg.kind === "IMAGE") {
       if (!msg.mediaId) throw new Error("Image message missing media id");
       const { base64, mimeType } = await downloadWhatsAppMedia(msg.mediaId);
-      result = await categorizeImage(base64, mimeType);
+      result = await categorizeImage(householdId, base64, mimeType);
     } else if (msg.kind === "AUDIO") {
       if (!msg.mediaId) throw new Error("Audio message missing media id");
       const { base64, mimeType } = await downloadWhatsAppMedia(msg.mediaId);
       const transcript = await transcribeAudio(base64, mimeType);
       await prisma.inboundMessage.update({ where: { id: record.id }, data: { transcript } });
-      result = await categorizeText(transcript);
+      result = await categorizeText(householdId, transcript);
     } else {
       if (!msg.text) throw new Error("Text message missing body");
-      result = await categorizeText(msg.text);
+      result = await categorizeText(householdId, msg.text);
     }
 
-    await finishProcessing(record.id, msg.fromPhone, user?.id ?? null, result, msg.kind);
+    await finishProcessing(record.id, msg.fromPhone, user.id, householdId, result, msg.kind);
   } catch (err: any) {
     await prisma.inboundMessage.update({
       where: { id: record.id },
@@ -72,6 +128,116 @@ export async function handleInboundWhatsAppMessage(msg: InboundWhatsAppMessage) 
       friendlyErrorMessage(err) +
         "\n\nYou can also just type it, e.g. \"$12.50 coffee\" or add it in the app."
     );
+  }
+}
+
+/** Routes a question / advice-seeking WhatsApp text to the chat assistant, with per-phone-number memory. */
+async function handleAssistantQuestion(
+  waMessageId: string,
+  fromPhone: string,
+  userId: string,
+  householdId: string,
+  text: string
+) {
+  const record = await prisma.inboundMessage.create({
+    data: { householdId, waMessageId, fromPhone, userId, kind: "TEXT", status: "PROCESSING" },
+  });
+
+  try {
+    const conversation = await getOrCreateConversation({ householdId, channel: "WHATSAPP", userId, phone: fromPhone });
+    const history = await getRecentMessages(conversation.id);
+    const reply = await runAssistantTurn(history, text, userId, householdId, conversation.id);
+
+    await appendMessage(conversation.id, "user", text);
+    await appendMessage(conversation.id, "assistant", reply);
+    await prisma.inboundMessage.update({ where: { id: record.id }, data: { status: "ANSWERED" } });
+    await safeReply(fromPhone, reply);
+  } catch (err: any) {
+    await prisma.inboundMessage.update({
+      where: { id: record.id },
+      data: { status: "FAILED", errorMessage: String(err?.message ?? err) },
+    });
+    await safeReply(fromPhone, friendlyErrorMessage(err));
+  }
+}
+
+async function hasPendingImport(householdId: string, fromPhone: string): Promise<boolean> {
+  const conversation = await prisma.conversation.findFirst({
+    where: { householdId, channel: "WHATSAPP", phone: fromPhone, pendingImportJson: { not: null } },
+  });
+  return !!conversation;
+}
+
+/**
+ * A whole statement sent as a file — CSV parses deterministically; anything
+ * else (PDF, or a photo of a paper statement sent as a "document") goes
+ * through Claude's document/vision extraction. Either way, the extracted
+ * rows are categorized and handed to the assistant, which asks which
+ * account to file them under and commits once the person answers — the
+ * same preview/commit flow a pasted-text statement in chat uses.
+ */
+async function handleStatementDocument(
+  waMessageId: string,
+  fromPhone: string,
+  userId: string,
+  householdId: string,
+  mediaId: string,
+  filename?: string
+) {
+  const record = await prisma.inboundMessage.create({
+    data: { householdId, waMessageId, fromPhone, userId, kind: "DOCUMENT", mediaId, status: "PROCESSING" },
+  });
+
+  try {
+    const { base64, mimeType } = await downloadWhatsAppMedia(mediaId);
+    const isCsv = mimeType.includes("csv") || (filename ?? "").toLowerCase().endsWith(".csv");
+
+    const { rows, note } = isCsv
+      ? { ...parseStatementCsv(Buffer.from(base64, "base64").toString("utf8")), note: "" }
+      : await extractStatementFromDocument(base64, mimeType);
+
+    if (rows.length === 0) {
+      await prisma.inboundMessage.update({
+        where: { id: record.id },
+        data: { status: "FAILED", errorMessage: "No transactions found" },
+      });
+      await safeReply(
+        fromPhone,
+        `I couldn't find any transactions in that file.${note ? ` (${note})` : ""} A CSV or PDF export usually works best.`
+      );
+      return;
+    }
+
+    const categorized = await categorizeRows(householdId, rows);
+    const conversation = await getOrCreateConversation({ householdId, channel: "WHATSAPP", userId, phone: fromPhone });
+    await prisma.conversation.update({
+      where: { id: conversation.id },
+      data: { pendingImportJson: JSON.stringify(categorized) },
+    });
+
+    const total = categorized.reduce((s, r) => s + r.amount, 0);
+    const breakdown = summarizeByBucket(categorized)
+      .slice(0, 4)
+      .map((b) => `${b.name}: $${Math.round(b.total)}`)
+      .join(", ");
+    const userSummary = `Sent a statement: ${categorized.length} transactions totaling $${Math.round(total)}.`;
+    const kickoff = `[Statement attachment processed — ${categorized.length} transactions totaling $${Math.round(
+      total
+    )} (${breakdown}).${note ? ` Note: ${note}.` : ""} Ask which account to file these under; call commit_statement once they answer — don't call preview_statement again, it's already done.]`;
+
+    const history = await getRecentMessages(conversation.id);
+    const reply = await runAssistantTurn(history, kickoff, userId, householdId, conversation.id);
+    await appendMessage(conversation.id, "user", userSummary);
+    await appendMessage(conversation.id, "assistant", reply);
+
+    await prisma.inboundMessage.update({ where: { id: record.id }, data: { status: "ANSWERED" } });
+    await safeReply(fromPhone, reply);
+  } catch (err: any) {
+    await prisma.inboundMessage.update({
+      where: { id: record.id },
+      data: { status: "FAILED", errorMessage: String(err?.message ?? err) },
+    });
+    await safeReply(fromPhone, friendlyErrorMessage(err));
   }
 }
 
@@ -89,7 +255,8 @@ function friendlyErrorMessage(err: any): string {
 async function finishProcessing(
   inboundMessageId: string,
   fromPhone: string,
-  userId: string | null,
+  userId: string,
+  householdId: string,
   result: CategorizationResult,
   kind: MessageKind
 ) {
@@ -106,13 +273,13 @@ async function finishProcessing(
   }
 
   if (result.bucketId && result.confidence >= 0.6) {
-    await commitTransaction(inboundMessageId, fromPhone, userId, result, result.bucketId, kind);
+    await commitTransaction(inboundMessageId, fromPhone, userId, householdId, result, result.bucketId, kind);
     return;
   }
 
   // Low confidence or no match — ask which bucket it belongs to.
   const buckets = await prisma.bucket.findMany({
-    where: { archived: false },
+    where: { householdId, archived: false },
     orderBy: { name: "asc" },
     select: { id: true, name: true },
   });
@@ -132,15 +299,17 @@ async function finishProcessing(
 async function commitTransaction(
   inboundMessageId: string,
   fromPhone: string,
-  userId: string | null,
+  userId: string,
+  householdId: string,
   result: CategorizationResult,
   bucketId: string,
   kind: MessageKind
 ) {
-  const bucket = await prisma.bucket.findUniqueOrThrow({ where: { id: bucketId } });
+  const bucket = await prisma.bucket.findFirstOrThrow({ where: { id: bucketId, householdId } });
 
   const transaction = await prisma.transaction.create({
     data: {
+      householdId,
       amount: result.amount!,
       currency: result.currency,
       merchant: result.merchant,
@@ -161,7 +330,7 @@ async function commitTransaction(
     data: { status: "CONFIRMED", transactionId: transaction.id, extractedJson: JSON.stringify(result) },
   });
 
-  const statuses = await getBucketStatuses();
+  const statuses = await getBucketStatuses(householdId);
   const status = statuses.find((s) => s.bucketId === bucket.id);
   const feedback = status ? suggestionFor(status) : `Logged to ${bucket.name}.`;
   const microNote = result.isMicro
@@ -184,11 +353,12 @@ async function findRecentPending(fromPhone: string) {
 
 /** Returns true if `text` was consumed as a resolution of the pending message. */
 async function tryResolvePendingReply(
+  householdId: string,
   pending: { id: string; extractedJson: string | null },
   text: string
 ): Promise<boolean> {
   const buckets = await prisma.bucket.findMany({
-    where: { archived: false },
+    where: { householdId, archived: false },
     orderBy: { name: "asc" },
     select: { id: true, name: true },
   });
@@ -206,9 +376,10 @@ async function tryResolvePendingReply(
   const result: CategorizationResult = JSON.parse(pending.extractedJson);
   const fullPending = await prisma.inboundMessage.findUniqueOrThrow({ where: { id: pending.id } });
 
-  const bucket = await prisma.bucket.findUniqueOrThrow({ where: { id: chosen.id } });
+  const bucket = await prisma.bucket.findFirstOrThrow({ where: { id: chosen.id, householdId } });
   const transaction = await prisma.transaction.create({
     data: {
+      householdId,
       amount: result.amount!,
       currency: result.currency,
       merchant: result.merchant,
@@ -229,7 +400,7 @@ async function tryResolvePendingReply(
     data: { status: "CONFIRMED", transactionId: transaction.id },
   });
 
-  const statuses = await getBucketStatuses();
+  const statuses = await getBucketStatuses(householdId);
   const status = statuses.find((s) => s.bucketId === bucket.id);
   const feedback = status ? suggestionFor(status) : `Logged to ${bucket.name}.`;
   await safeReply(

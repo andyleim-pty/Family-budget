@@ -5,6 +5,6 @@ export const config = {
   // authenticates via its own verify token / signature, not a session),
   // the login page, and static assets.
   matcher: [
-    "/((?!api/auth|api/whatsapp|login|_next/static|_next/image|favicon.ico).*)",
+    "/((?!api/auth|api/whatsapp|api/cron|login|_next/static|_next/image|favicon.ico).*)",
   ],
 };
